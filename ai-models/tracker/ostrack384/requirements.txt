@@ -1,0 +1,10 @@
+cvat_sdk>=2.42
+opencv-python-headless
+pyyaml
+pillow
+easydict
+timm==0.6.13
+torch
+torchvision
+numpy
+gdown

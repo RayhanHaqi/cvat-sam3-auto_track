@@ -1,0 +1,82 @@
+metadata:
+  name: pth-ostrack-base
+  namespace: cvat
+  annotations:
+    name: OSTrack Base
+    type: tracker
+    spec:
+
+spec:
+  description: One-Stream Transformer Tracking
+  runtime: 'python:3.10'
+  handler: main:handler
+  eventTimeout: 30s
+  env:
+    - name: PYTHONPATH
+      value: /opt/nuclio/OSTrack
+
+  build:
+    image: cvat.pth.ostrack.base:latest-gpu
+    baseImage: ubuntu:22.04
+    directives:
+      preCopy:
+        - kind: ENV
+          value: NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
+        - kind: RUN
+          value: |-
+            sed -i 's/archive.ubuntu.com/tw.archive.ubuntu.com/g' /etc/apt/sources.list \
+              && apt update \
+              && apt install -y --no-install-recommends \
+                git \
+                wget \
+                ca-certificates \
+                python-is-python3 \
+                python3 \
+                python3-pip \
+              && rm -rf /var/lib/apt/lists/*
+        - kind: RUN
+          value: |-
+            pip install \
+              jsonpickle opencv-python-headless pyyaml pillow easydict cython \
+              timm==0.6.13 tensorboardX jpeg4py pandas tqdm scipy visdom matplotlib lmdb\
+              pycocotools tb-nightly tikzplotlib thop colorama setuptools wandb \
+              torch torchvision numpy \
+              --extra-index-url https://download.pytorch.org/whl/cu124 \
+              --no-cache-dir
+
+        - kind: WORKDIR
+          value: /opt/nuclio
+        - kind: RUN
+          value: |-
+            git clone https://github.com/botaoye/OSTrack.git OSTrack && \
+            sed -i 's/from torch._six import string_classes/string_classes = (str, bytes)/g' OSTrack/lib/train/data/loader.py && \
+            echo "class EnvSettings:" > OSTrack/lib/test/evaluation/local.py && \
+            echo "    def __init__(self):" >> OSTrack/lib/test/evaluation/local.py && \
+            echo "        self.prj_dir = '/opt/nuclio/OSTrack'" >> OSTrack/lib/test/evaluation/local.py && \
+            echo "        self.save_dir = '/opt/nuclio/OSTrack/output'" >> OSTrack/lib/test/evaluation/local.py && \
+            echo "        self.network_path = '/opt/nuclio/OSTrack/output/test/networks'" >> OSTrack/lib/test/evaluation/local.py && \
+            echo "        self.results_path = '/opt/nuclio/OSTrack/output/test/tracking_results'" >> OSTrack/lib/test/evaluation/local.py && \
+            echo "        self.segmentation_path = '/opt/nuclio/OSTrack/output/test/segmentation_results'" >> OSTrack/lib/test/evaluation/local.py && \
+            echo "        self.result_plot_path = '/opt/nuclio/OSTrack/output/test/result_plots'" >> OSTrack/lib/test/evaluation/local.py
+
+        - kind: RUN
+          value: "wget https://huggingface.co/taryya/XTrack/resolve/main/OSTrack_ep0300.pth.tar -O /ostrack.pth"
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 1
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 268435456 # 256MB
+
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume

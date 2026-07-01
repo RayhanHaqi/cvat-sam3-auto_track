@@ -1,0 +1,76 @@
+metadata:
+  name: meta-sam2-tracker-v2
+  namespace: cvat
+  annotations:
+    name: SAM 2.1 Video Tracker v2
+    type: tracker
+    framework: pytorch
+    spec: |
+      [
+        { "id": 0, "name": "ping_pong_ball" }
+      ]
+
+spec:
+  description: SAM 2.1 Streaming Tracker (Optimized for RTX 5060 Ti)
+  runtime: 'python:3.11'
+  handler: main:handler
+  eventTimeout: 120s
+
+  env:
+    - name: PYTHONPATH
+      value: /opt/nuclio/sam2
+
+  build:
+    image: cvat.meta.sam2.tracker:v2-gpu
+    baseImage: ubuntu:22.04
+    directives:
+      preCopy:
+        - kind: ENV
+          value: NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility DEBIAN_FRONTEND=noninteractive
+        - kind: RUN
+          value: |-
+            apt-get update && apt-get install -y --no-install-recommends \
+              git wget ca-certificates \
+              python3.11 python3.11-dev python3-pip \
+              libgl1-mesa-glx libglib2.0-0 \
+            && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+            && ln -sf /usr/bin/python3.11 /usr/bin/python \
+            && rm -rf /var/lib/apt/lists/*
+        - kind: RUN
+          value: |-
+            pip install --upgrade pip setuptools wheel --no-cache-dir && \
+            pip install torch torchvision \
+              --extra-index-url https://download.pytorch.org/whl/cu124 \
+              --no-cache-dir
+        - kind: RUN
+          value: |-
+            git clone https://github.com/Gy920/segment-anything-2-real-time.git /opt/nuclio/sam2 && \
+            pip install numpy tqdm opencv-python-headless pillow \
+              hydra-core iopath timm setproctitle \
+              --no-cache-dir
+        - kind: WORKDIR
+          value: /opt/nuclio/sam2
+        - kind: RUN
+          value: |-
+            mkdir -p checkpoints && \
+            wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt \
+              -O checkpoints/sam2.1_hiera_large.pt
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 1
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 268435456
+
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume

@@ -1,0 +1,94 @@
+metadata:
+  name: meta-sam3-tracker-v4
+  namespace: cvat
+  annotations:
+    name: SAM 3.1 Video Tracker v4
+    type: tracker
+    framework: pytorch
+    spec: |
+      [
+        { "id": 0, "name": "ping_pong_ball" }
+      ]
+
+spec:
+  description: SAM 3.1 single-object video tracker
+  runtime: 'python:3.10'
+  handler: main:handler
+  eventTimeout: 120s
+
+  env:
+    - name: PYTHONPATH
+      value: /opt/nuclio/sam3
+    - name: PYTORCH_CUDA_ALLOC_CONF
+      value: expandable_segments:True
+    - name: TRITON_INTERPRET
+      value: "1"
+    - name: SAM3_PROMPT_MODE
+      value: box
+    - name: SAM3_TEXT_PROMPT
+      value: ping pong ball
+    - name: SAM3_OUTPUT_POLICY
+      value: sam_box
+    - name: SAM3_OUTPUT_PROB_THRESH
+      value: "0.3"
+    - name: SAM3_IR_REFINE
+      value: "0"
+    - name: SAM3_IR_STOP_ON_MISSING
+      value: "0"
+
+  build:
+    image: cvat.meta.sam3.tracker:v4-gpu
+    baseImage: nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+    directives:
+      preCopy:
+        - kind: ENV
+          value: NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility DEBIAN_FRONTEND=noninteractive
+        - kind: RUN
+          value: |-
+            apt-get update && apt-get install -y --no-install-recommends \
+              git wget ca-certificates \
+              python3 python3-dev python3-pip \
+              libgl1-mesa-glx libglib2.0-0 ffmpeg build-essential \
+            && ln -sf /usr/bin/python3 /usr/bin/python \
+            && rm -rf /var/lib/apt/lists/*
+        - kind: RUN
+          value: |-
+            python3 -m pip install --upgrade pip setuptools wheel --no-cache-dir && \
+            python3 -m pip install torch torchvision \
+              --extra-index-url https://download.pytorch.org/whl/cu128 \
+              --no-cache-dir
+        - kind: RUN
+          value: |-
+            python3 -m pip install "numpy>=1.26,<2" opencv-python-headless pillow \
+              matplotlib pycocotools psutil setuptools scikit-image --no-cache-dir
+        - kind: RUN
+          value: |-
+            git clone https://github.com/facebookresearch/sam3.git /opt/nuclio/sam3 && \
+            cd /opt/nuclio/sam3 && python3 -m pip install -e . --no-cache-dir
+        - kind: ENV
+          value: HF_HOME=/opt/nuclio/sam3/cache
+        - kind: RUN
+          value: |-
+            python3 -m pip install einops ninja setproctitle --no-cache-dir && \
+            (python3 -m pip install flash-attn --no-build-isolation --no-cache-dir \
+              --index-url https://download.pytorch.org/whl/cu128 \
+              || echo "WARNING: flash-attn install failed; using PyTorch fallback attention")
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 1
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 268435456
+
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
