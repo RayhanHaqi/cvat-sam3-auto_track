@@ -631,6 +631,8 @@ class ModelHandler:
                 bbox = reference_bbox
             refine_started = time.perf_counter()
             bbox = self._maybe_refine_bbox(image, bbox)
+            if bbox is None:
+                bbox = reference_bbox
             post_refine_summary = bbox_summary(bbox)
             postprocess_ms = (time.perf_counter() - refine_started) * 1000.0
             out_state = self._build_state(sess_key, bbox, sess["prompt_bbox"])

@@ -140,6 +140,38 @@ def test_init_uses_seed_bbox_when_sam_output_missing():
     assert states[0].get("lost") is not True
 
 
+def test_init_keeps_seed_bbox_when_ir_stop_on_missing_returns_none():
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(ir_refine_enabled=True, ir_stop_on_missing=True)
+    key = "init_ir_sess"
+    handler._sessions = {
+        key: {
+            "frame_count": 0,
+            "prompt_bbox": None,
+            "image_height": 100,
+            "image_width": 100,
+        },
+    }
+
+    def _save_frame(sess, _image):
+        sess["frame_count"] += 1
+        sess["image_height"] = 100
+        sess["image_width"] = 100
+
+    handler._save_frame = _save_frame
+    handler._ensure_session = lambda _sess: None
+    handler._propagate_frame = lambda *_args: {}
+    handler._output_to_bbox = lambda *_args, **_kwargs: [12.0, 12.0, 32.0, 32.0]
+    handler._maybe_refine_bbox = _mod.ModelHandler._maybe_refine_bbox.__get__(handler, ModelHandler)
+
+    seed = [10.0, 10.0, 30.0, 30.0]
+    image = np.full((200, 200, 3), 20, dtype=np.uint8)
+    shapes, states = handler.infer_batch(image, [seed], [{"session_key": key}])
+    assert shapes == [seed]
+    assert states[0]["last_bbox"] == seed
+    assert states[0].get("lost") is not True
+
+
 def test_continue_returns_none_when_ir_stop_on_missing():
     handler, key = _continue_handler([90.0, 90.0, 110.0, 110.0])
     handler.config = Sam3Config(ir_refine_enabled=True, ir_stop_on_missing=True)
