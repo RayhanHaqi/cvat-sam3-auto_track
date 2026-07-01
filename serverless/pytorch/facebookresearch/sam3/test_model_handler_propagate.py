@@ -66,24 +66,7 @@ def test_init_performs_one_full_chunk_propagation_and_caches_each_frame():
     handler = ModelHandler.__new__(ModelHandler)
     handler.config = Sam3Config(ir_refine_enabled=False)
     handler.predictor = _FakePredictor(_stream_for_count(preload_count))
-    key = "preload_init"
-    temp_dir = tempfile.mkdtemp(prefix="sam3_test_")
-    handler._sessions = {
-        key: {
-            "temp_dir": temp_dir,
-            "frame_count": 0,
-            "loaded_frame_count": 0,
-            "session_id": None,
-            "prompt_bbox": None,
-            "image_height": None,
-            "image_width": None,
-            "base_frame": None,
-            "preloaded_count": 0,
-            "preloaded_until_frame": None,
-            "frame_cache": {},
-            "cache_ready": False,
-        },
-    }
+    handler._sessions = {}
     handler._output_to_bbox = lambda *_args, **_kwargs: [12.0, 12.0, 32.0, 32.0]
     handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
 
@@ -92,7 +75,7 @@ def test_init_performs_one_full_chunk_propagation_and_caches_each_frame():
     shapes, states = handler.infer_batch(
         None,
         [seed],
-        [{"session_key": key}],
+        [],
         frame_index=0,
         preload_images=preload_images,
         preload_base_frame=0,
@@ -100,6 +83,7 @@ def test_init_performs_one_full_chunk_propagation_and_caches_each_frame():
         preload_payload_bytes=1234,
     )
 
+    key = states[0]["session_key"]
     sess = handler._sessions[key]
     assert len(handler.predictor.stream_requests) == 1
     assert handler.predictor.stream_requests[0]["start_frame_index"] == 0
@@ -218,34 +202,18 @@ def test_failed_init_closes_predictor_and_deletes_temp_files():
             raise RuntimeError("propagation failed")
 
     handler.predictor = _FailPredictor(_stream_for_count(preload_count))
-    key = "preload_fail"
-    temp_dir = tempfile.mkdtemp(prefix="sam3_test_")
-    handler._sessions = {
-        key: {
-            "temp_dir": temp_dir,
-            "frame_count": 0,
-            "loaded_frame_count": 0,
-            "session_id": None,
-            "prompt_bbox": None,
-            "image_height": None,
-            "image_width": None,
-            "base_frame": None,
-            "preloaded_count": 0,
-            "preloaded_until_frame": None,
-            "frame_cache": {},
-            "cache_ready": False,
-        },
-    }
+    handler._sessions = {}
     handler._output_to_bbox = lambda *_args, **_kwargs: [12.0, 12.0, 32.0, 32.0]
     handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
     preload_images = [_tiny_image_b64() for _ in range(preload_count)]
     seed = [10.0, 10.0, 30.0, 30.0]
 
+    sessions_before = dict(handler._sessions)
     try:
         handler.infer_batch(
             None,
             [seed],
-            [{"session_key": key}],
+            [],
             frame_index=0,
             preload_images=preload_images,
             preload_base_frame=0,
@@ -256,10 +224,7 @@ def test_failed_init_closes_predictor_and_deletes_temp_files():
         raised = True
 
     assert raised
-    sess = handler._sessions[key]
-    assert sess["session_id"] is None
-    assert sess["temp_dir"] is None
-    assert not os.path.exists(temp_dir)
+    assert handler._sessions == sessions_before
     assert len(handler.predictor.close_requests) == 1
 
 
@@ -274,24 +239,7 @@ def test_cache_construction_preserves_prompt_snap_back_loss():
         {"frame_index": 0, "outputs": {"out_boxes_xywh": [[0.5, 0.5, 0.05, 0.05]]}},
         {"frame_index": 1, "outputs": {"out_boxes_xywh": [[0.1, 0.1, 0.05, 0.05]]}},
     ])
-    key = "snap_back"
-    temp_dir = tempfile.mkdtemp(prefix="sam3_test_")
-    handler._sessions = {
-        key: {
-            "temp_dir": temp_dir,
-            "frame_count": 0,
-            "loaded_frame_count": 0,
-            "session_id": None,
-            "prompt_bbox": None,
-            "image_height": None,
-            "image_width": None,
-            "base_frame": None,
-            "preloaded_count": 0,
-            "preloaded_until_frame": None,
-            "frame_cache": {},
-            "cache_ready": False,
-        },
-    }
+    handler._sessions = {}
 
     def _bbox(outputs, sess, reference_bbox):
         frame_idx = 0 if reference_bbox == seed else 1
@@ -303,15 +251,16 @@ def test_cache_construction_preserves_prompt_snap_back_loss():
     handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
 
     preload_images = [_tiny_image_b64() for _ in range(preload_count)]
-    handler.infer_batch(
+    _shapes, states = handler.infer_batch(
         None,
         [seed],
-        [{"session_key": key}],
+        [],
         frame_index=0,
         preload_images=preload_images,
         preload_base_frame=0,
         preload_frame_count=preload_count,
     )
+    key = states[0]["session_key"]
 
     entry = handler._sessions[key]["frame_cache"][1]
     assert entry["bbox"] is None
@@ -331,3 +280,127 @@ def test_cache_construction_preserves_prompt_snap_back_loss():
     )
     assert shapes == [None]
     assert states[0]["lost"] is True
+
+
+def test_init_invalid_preload_count_leaves_no_session():
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(ir_refine_enabled=False)
+    handler.predictor = _FakePredictor([])
+    handler._sessions = {}
+    seed = [10.0, 10.0, 30.0, 30.0]
+    try:
+        handler.infer_batch(
+            None,
+            [seed],
+            [],
+            frame_index=0,
+            preload_images=[_tiny_image_b64()],
+            preload_base_frame=0,
+            preload_frame_count=0,
+        )
+        raised = False
+    except ValidationError:
+        raised = True
+    assert raised
+    assert handler._sessions == {}
+    assert handler.predictor.stream_requests == []
+
+
+def test_init_corrupt_preload_image_leaves_no_session():
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(ir_refine_enabled=False)
+    handler.predictor = _FakePredictor([])
+    handler._sessions = {}
+    seed = [10.0, 10.0, 30.0, 30.0]
+    try:
+        handler.infer_batch(
+            None,
+            [seed],
+            [],
+            frame_index=0,
+            preload_images=["not-valid-base64-image"],
+            preload_base_frame=0,
+            preload_frame_count=1,
+        )
+        raised = False
+    except Exception:
+        raised = True
+    assert raised
+    assert handler._sessions == {}
+    assert handler.predictor.handle_requests == []
+
+
+def test_init_failure_after_session_start_leaves_no_usable_session():
+    preload_count = 2
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(ir_refine_enabled=False)
+
+    class _FailAfterStart(_FakePredictor):
+        def handle_stream_request(self, request):
+            raise RuntimeError("propagation failed after start")
+
+    handler.predictor = _FailAfterStart(_stream_for_count(preload_count))
+    handler._sessions = {}
+    handler._output_to_bbox = lambda *_args, **_kwargs: [12.0, 12.0, 32.0, 32.0]
+    handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
+    preload_images = [_tiny_image_b64() for _ in range(preload_count)]
+    seed = [10.0, 10.0, 30.0, 30.0]
+
+    try:
+        handler.infer_batch(
+            None,
+            [seed],
+            [],
+            frame_index=0,
+            preload_images=preload_images,
+            preload_base_frame=0,
+            preload_frame_count=preload_count,
+        )
+        raised = False
+    except RuntimeError:
+        raised = True
+
+    assert raised
+    assert handler._sessions == {}
+    assert len(handler.predictor.close_requests) == 1
+
+
+def test_track_relative_frame_95_with_nonzero_base_frame():
+    base_frame = 50
+    preloaded_count = 96
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(ir_refine_enabled=False)
+    handler.predictor = _FakePredictor([])
+    key = "nonzero_base"
+    expected_bbox = [12.0 + 95, 12.0, 32.0 + 95, 32.0]
+    frame_cache = {
+        idx: {"bbox": [12.0 + idx, 12.0, 32.0 + idx, 32.0], "lost": False}
+        for idx in range(preloaded_count)
+    }
+    handler._sessions = {
+        key: {
+            "temp_dir": None,
+            "prompt_bbox": [10.0, 10.0, 30.0, 30.0],
+            "base_frame": base_frame,
+            "preloaded_count": preloaded_count,
+            "preloaded_until_frame": base_frame + preloaded_count - 1,
+            "frame_cache": frame_cache,
+            "cache_ready": True,
+        },
+    }
+    prev_state = {
+        "session_key": key,
+        "last_bbox": [10.0, 10.0, 30.0, 30.0],
+        "base_frame": base_frame,
+        "preloaded_count": preloaded_count,
+        "preloaded_until_frame": base_frame + preloaded_count - 1,
+    }
+    shapes, states = handler.infer_batch(
+        None,
+        [],
+        [prev_state],
+        frame_index=base_frame + 95,
+    )
+    assert handler.predictor.stream_requests == []
+    assert shapes == [expected_bbox]
+    assert states[0]["last_bbox"] == expected_bbox

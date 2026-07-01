@@ -476,13 +476,8 @@ class ModelHandler:
         self.predictor = build_sam3_predictor(version="sam3", compile=False)
         self._sessions = {}
 
-    def _make_session(self):
-        if len(self._sessions) >= MAX_SESSIONS:
-            oldest = next(iter(self._sessions))
-            self._destroy_session(oldest)
-
-        key = uuid.uuid4().hex[:12]
-        self._sessions[key] = {
+    def _new_session_record(self):
+        return {
             "temp_dir": tempfile.mkdtemp(prefix="sam3_"),
             "frame_count": 0,
             "loaded_frame_count": 0,
@@ -496,6 +491,37 @@ class ModelHandler:
             "frame_cache": {},
             "cache_ready": False,
         }
+
+    def _register_session(self, key, sess):
+        if len(self._sessions) >= MAX_SESSIONS:
+            oldest = next(iter(self._sessions))
+            self._destroy_session(oldest)
+        self._sessions[key] = sess
+
+    def _cleanup_session_workspace(self, sess):
+        self._close_predictor_session(sess)
+        temp_dir = sess.get("temp_dir")
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            sess["temp_dir"] = None
+        sess["session_id"] = None
+
+    def _allocate_init_session_key(self, states):
+        if states and len(states) > 0 and isinstance(states[0], dict):
+            key = states[0].get("session_key")
+            if key:
+                if key in self._sessions:
+                    raise ValidationError(
+                        f"session_key {key!r} already exists; re-seed tracking from the annotation frame"
+                    )
+                raise SessionStaleError(
+                    f"session_key {key!r} is stale; re-seed tracking from the annotation frame"
+                )
+        return uuid.uuid4().hex[:12]
+
+    def _make_session(self):
+        key = uuid.uuid4().hex[:12]
+        self._register_session(key, self._new_session_record())
         return key
 
     def _get_key(self, states):
@@ -715,10 +741,10 @@ class ModelHandler:
         preload_count,
         seed_shape,
     ):
-        self._save_preload_sequence(sess, preload_images, preload_count)
-        sess["prompt_bbox"] = list(seed_shape)
         cache = {}
         try:
+            self._save_preload_sequence(sess, preload_images, preload_count)
+            sess["prompt_bbox"] = list(seed_shape)
             sess["session_id"] = self._start_session(sess)
             self._add_prompt(sess, 0)
             outputs_by_frame = self._propagate_full_chunk(sess, preload_count)
@@ -753,12 +779,7 @@ class ModelHandler:
             sess["cache_ready"] = True
             return cache
         finally:
-            self._close_predictor_session(sess)
-            temp_dir = sess.get("temp_dir")
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                sess["temp_dir"] = None
-            sess["session_id"] = None
+            self._cleanup_session_workspace(sess)
 
     def infer_batch(
         self,
@@ -824,15 +845,20 @@ class ModelHandler:
         if relative_frame != 0:
             raise ValidationError("SAM3 init must start at preload_base_frame")
 
-        sess_key = self._get_key(states)
-        sess = self._sessions[sess_key]
+        sess_key = self._allocate_init_session_key(states)
+        sess = self._new_session_record()
         sess["base_frame"] = base_frame
         sess["preloaded_count"] = preloaded_count
         sess["preloaded_until_frame"] = base_frame + preloaded_count - 1
 
         seed_shape = self._first_seed_shape(shapes)
         infer_started = time.perf_counter()
-        cache = self._build_frame_cache(sess, preload_images, preloaded_count, seed_shape)
+        try:
+            cache = self._build_frame_cache(sess, preload_images, preloaded_count, seed_shape)
+        except Exception:
+            self._cleanup_session_workspace(sess)
+            raise
+        self._register_session(sess_key, sess)
         sam_inference_ms = (time.perf_counter() - infer_started) * 1000.0
 
         entry = cache[0]

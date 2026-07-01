@@ -128,24 +128,7 @@ def test_init_uses_seed_bbox_when_sam_output_missing():
         ),
     )
     key = "init_sess"
-    import tempfile
-    temp_dir = tempfile.mkdtemp(prefix="sam3_test_")
-    handler._sessions = {
-        key: {
-            "temp_dir": temp_dir,
-            "frame_count": 0,
-            "loaded_frame_count": 0,
-            "session_id": None,
-            "prompt_bbox": None,
-            "image_height": None,
-            "image_width": None,
-            "base_frame": None,
-            "preloaded_count": 0,
-            "preloaded_until_frame": None,
-            "frame_cache": {},
-            "cache_ready": False,
-        },
-    }
+    handler._sessions = {}
     handler._output_to_bbox = lambda *_args, **_kwargs: None
     handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
 
@@ -160,7 +143,7 @@ def test_init_uses_seed_bbox_when_sam_output_missing():
     shapes, states = handler.infer_batch(
         None,
         [seed],
-        [{"session_key": key}],
+        [],
         frame_index=0,
         preload_images=[preload_b64],
         preload_base_frame=0,

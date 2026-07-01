@@ -55,17 +55,35 @@ def handler(context, event):
         diag_meta = data.pop("_autoTrackDiag", None)
         decode_ms = 0.0
         image = None
-        if "image" in data and data["image"] is not None:
-            decode_start = time.perf_counter()
-            buf = io.BytesIO(base64.b64decode(data["image"]))
-            image = np.array(Image.open(buf).convert("RGB"))
-            decode_ms = (time.perf_counter() - decode_start) * 1000.0
-        shapes = data.get("shapes") or []
-        states = data.get("states") or []
         preload_images = data.get("preload_images")
         preload_base_frame = data.get("preload_base_frame")
         preload_frame_count = data.get("preload_frame_count")
         frame_index = data.get("frame_index")
+        states = data.get("states") or []
+        is_preload_init = preload_images is not None
+        is_cached_track = (
+            not is_preload_init
+            and states
+            and isinstance(states[0], dict)
+            and states[0].get("preloaded_count") is not None
+        )
+        if is_cached_track:
+            if data.get("image") is not None:
+                raise ValidationError("SAM3 cached track requests must not include image")
+            if data.get("shapes"):
+                raise ValidationError("SAM3 cached track requests must not include shapes")
+            if data.get("preload_images") is not None:
+                raise ValidationError("SAM3 cached track requests must not include preload_images")
+            shapes = []
+        else:
+            if "image" in data and data["image"] is not None:
+                decode_start = time.perf_counter()
+                buf = io.BytesIO(base64.b64decode(data["image"]))
+                image = np.array(Image.open(buf).convert("RGB"))
+                decode_ms = (time.perf_counter() - decode_start) * 1000.0
+            shapes = data.get("shapes") or []
+            if is_preload_init and not shapes:
+                raise ValidationError("shapes are required for SAM3 preload init")
         preload_payload_bytes = None
         if preload_images is not None:
             preload_payload_bytes = len(

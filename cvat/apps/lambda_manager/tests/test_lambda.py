@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import base64
 import json
 import os
 from collections import Counter
@@ -109,13 +110,29 @@ class _LambdaTestCaseBase(ApiTestBase):
         func_id = func.id
         annotations = functions["positive"][func_id]["metadata"]["annotations"]
         type_function = annotations["type"]
+        is_sam3_cached_continue = (
+            func_id == id_function_sam3_tracker
+            and "states" in payload
+            and "preload_images" not in payload
+            and "image" not in payload
+        )
         if type_function == "reid":
             if func_id == id_function_reid_with_response_data:
                 data = [0, 1]
             else:
                 data = []
         elif type_function == "tracker":
-            if "supported_shape_types" in annotations:
+            if is_sam3_cached_continue:
+                data = {
+                    "shapes": [None],
+                    "states": [{
+                        "session_key": "sam3-test",
+                        "base_frame": 0,
+                        "preloaded_count": 3,
+                        "preloaded_until_frame": 2,
+                    }],
+                }
+            elif "supported_shape_types" in annotations:
                 for shape in payload["shapes"]:
                     self.assertIsInstance(shape, dict)
                     self.assertIn("type", shape)
@@ -878,6 +895,101 @@ class LambdaTestCases(_LambdaTestCaseBase):
         }
         full_bytes = measure_sam3_nuclio_payload_bytes(full_payload)
         self.assertGreater(full_bytes, preload_only)
+
+    def test_sam3_specific_frames_job_rejected_before_invoke(self):
+        from cvat.apps.engine.models import Job, SegmentType
+
+        captured = []
+
+        def capture_invoke(func, payload):
+            captured.append((func.id, dict(payload)))
+            return self._invoke_function(func, payload)
+
+        job = Job.objects.get(segment__task_id=self.main_task["id"])
+        segment = job.segment
+        original_type = segment.type
+        original_frames = segment.frames
+        segment.type = SegmentType.SPECIFIC_FRAMES
+        segment.frames = "0,1,2"
+        segment.save()
+        try:
+            with mock.patch(
+                "cvat.apps.lambda_manager.views.LambdaGateway.invoke",
+                side_effect=capture_invoke,
+            ):
+                response = self._post_request(
+                    f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
+                    self.admin,
+                    data={
+                        "job": job.id,
+                        "frame": 0,
+                        "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
+                    },
+                )
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertIn("contiguous-range", response.content.decode("UTF-8"))
+            self.assertEqual(captured, [])
+        finally:
+            segment.type = original_type
+            segment.frames = original_frames
+            segment.save()
+
+    def test_sam3_preload_nonzero_base_and_job_boundary_truncation(self):
+        from cvat.apps.engine.models import Job
+
+        captured = []
+
+        def capture_invoke(func, payload):
+            captured.append((func.id, dict(payload)))
+            return self._invoke_function(func, payload)
+
+        job = Job.objects.get(segment__task_id=self.main_task["id"])
+        frame_b64 = base64.b64encode(b"jpeg").decode("ascii")
+
+        with mock.patch(
+            "cvat.apps.lambda_manager.views.LambdaFunction._get_image",
+            return_value=frame_b64,
+        ):
+            with mock.patch(
+                "cvat.apps.lambda_manager.views.LambdaFunction._sam3_preload_frame_indices",
+                return_value=[10, 11, 12],
+            ):
+                with mock.patch(
+                    "cvat.apps.lambda_manager.views.LambdaGateway.invoke",
+                    side_effect=capture_invoke,
+                ):
+                    response = self._post_request(
+                        f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
+                        self.admin,
+                        data={
+                            "job": job.id,
+                            "frame": 10,
+                            "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
+                        },
+                    )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sam3_init_payload = captured[-1][1]
+        self.assertEqual(sam3_init_payload["preload_base_frame"], 10)
+        self.assertEqual(sam3_init_payload["preload_frame_count"], 3)
+        self.assertEqual(sam3_init_payload["frame_index"], 10)
+
+        with mock.patch(
+            "cvat.apps.lambda_manager.views.LambdaGateway.invoke",
+            side_effect=capture_invoke,
+        ):
+            boundary_response = self._post_request(
+                f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
+                self.admin,
+                data={
+                    "job": job.id,
+                    "frame": 2,
+                    "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
+                },
+            )
+        self.assertEqual(boundary_response.status_code, status.HTTP_200_OK)
+        boundary_payload = captured[-1][1]
+        self.assertEqual(boundary_payload["preload_base_frame"], 2)
+        self.assertEqual(boundary_payload["preload_frame_count"], 1)
 
     def test_api_v2_lambda_functions_create_tracker_bad_signature(self):
         signer = TimestampSigner(key="bad key")

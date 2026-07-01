@@ -42,6 +42,7 @@ from cvat.apps.engine.models import (
     Label,
     RequestAction,
     RequestTarget,
+    SegmentType,
     ShapeType,
     SourceType,
     Task,
@@ -784,7 +785,14 @@ class LambdaFunction:
         return base64.b64encode(image.data.getvalue()).decode("utf-8")
 
     def _sam3_preload_frame_indices(self, db_job: Job, base_frame: int) -> list[int]:
-        last_frame = db_job.segment.stop_frame
+        segment = db_job.segment
+        if segment.type == SegmentType.SPECIFIC_FRAMES:
+            raise ValidationError(
+                "SAM3 cached tracking currently requires a contiguous-range job; "
+                "specific-frame jobs are not supported.",
+                code=status.HTTP_400_BAD_REQUEST,
+            )
+        last_frame = segment.stop_frame
         if base_frame > last_frame:
             raise ValidationError(
                 f"SAM3 seed frame {base_frame} is outside job range (last frame {last_frame})",
