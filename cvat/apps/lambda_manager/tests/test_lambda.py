@@ -35,6 +35,7 @@ id_function_reid_with_no_response_data = (
 id_function_interactor = "test-openvino-dextr"
 id_function_tracker = "test-pth-foolwood-siammask"
 id_function_tracker_with_supported_shape_types = "test-tracker-with-supported-shape-types"
+id_function_sam3_tracker = "meta-sam3-tracker-v4"
 id_function_non_type = "test-model-has-non-type"
 id_function_wrong_type = "test-model-has-wrong-type"
 id_function_unknown_type = "test-model-has-unknown-type"
@@ -114,7 +115,36 @@ class _LambdaTestCaseBase(ApiTestBase):
             else:
                 data = []
         elif type_function == "tracker":
-            if "supported_shape_types" in annotations:
+            if func_id == id_function_sam3_tracker:
+                if not payload.get("states"):
+                    self.assertIn("preload_images", payload)
+                    self.assertIn("preload_base_frame", payload)
+                    self.assertIn("preload_frame_count", payload)
+                    self.assertIn("frame_index", payload)
+                    self.assertEqual(
+                        payload["preload_frame_count"],
+                        len(payload["preload_images"]),
+                    )
+                    self.assertLessEqual(payload["preload_frame_count"], 96)
+                    self.assertEqual(payload["preload_base_frame"], payload["frame_index"])
+                else:
+                    self.assertNotIn("preload_images", payload)
+                    self.assertIn("frame_index", payload)
+                data = {
+                    "shapes": [[12.34, 34.0, 35.01, 41.99]],
+                    "states": [{
+                        "session_key": "sam3-test",
+                        "last_bbox": [12.34, 34.0, 35.01, 41.99],
+                        "base_frame": payload.get("preload_base_frame", 0),
+                        "preloaded_count": payload.get("preload_frame_count", 3),
+                        "preloaded_until_frame": (
+                            payload.get("preload_base_frame", 0)
+                            + payload.get("preload_frame_count", 3)
+                            - 1
+                        ),
+                    }],
+                }
+            elif "supported_shape_types" in annotations:
                 for shape in payload["shapes"]:
                     self.assertIsInstance(shape, dict)
                     self.assertIn("type", shape)
@@ -778,6 +808,23 @@ class LambdaTestCases(_LambdaTestCaseBase):
                 f"{LAMBDA_FUNCTIONS_PATH}/{id_func}", None, data=data_main_task
             )
             self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_api_v2_lambda_functions_create_sam3_tracker_preload_payload(self):
+        from cvat.apps.engine.models import Job
+
+        job = Job.objects.get(segment__task_id=self.main_task["id"])
+        data = {
+            "job": job.id,
+            "frame": 0,
+            "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
+        }
+        response = self._post_request(
+            f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
+            self.admin,
+            data=data,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("states", response.data)
 
     def test_api_v2_lambda_functions_create_tracker_bad_signature(self):
         signer = TimestampSigner(key="bad key")

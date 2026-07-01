@@ -87,6 +87,11 @@ def _auto_track_diag_log(event_name: str, **fields: Any) -> None:
     slogger.glob.info("AUTO_TRACK_DIAG %s", json.dumps(record, default=str))
 
 
+SAM3_TRACKER_FUNCTION_ID = "meta-sam3-tracker-v4"
+SAM3_PRELOAD_CHUNK_CAP = 96
+SAM3_NUCLIO_MAX_REQUEST_BODY_BYTES = 268_435_456
+SAM3_PRELOAD_MAX_PAYLOAD_BYTES = 240 * 1024 * 1024
+
 
 class LambdaGateway:
     NUCLIO_ROOT_URL = "/api/functions"
@@ -575,6 +580,47 @@ class LambdaFunction:
                         ],
                     }
                 )
+                frame_index = mandatory_arg("frame")
+                if self.id == SAM3_TRACKER_FUNCTION_ID:
+                    payload["frame_index"] = frame_index
+                    if "states" not in data:
+                        if db_job is None:
+                            raise ValidationError(
+                                "SAM3 bounded preload requires a job context",
+                                code=status.HTTP_400_BAD_REQUEST,
+                            )
+                        preload_fields = self._build_sam3_preload_fields(
+                            db_task,
+                            db_job,
+                            frame_index,
+                        )
+                        preload_payload_bytes = len(json.dumps(preload_fields))
+                        if preload_payload_bytes > SAM3_PRELOAD_MAX_PAYLOAD_BYTES:
+                            raise ValidationError(
+                                "SAM3 preload payload size "
+                                f"{preload_payload_bytes} bytes exceeds limit "
+                                f"({SAM3_PRELOAD_MAX_PAYLOAD_BYTES} bytes); "
+                                "reduce chunk cap or image quality",
+                                code=status.HTTP_400_BAD_REQUEST,
+                            )
+                        slogger.glob.info(
+                            "SAM3 preload prepared: base_frame=%s count=%s payload_bytes=%s limit=%s",
+                            preload_fields["preload_base_frame"],
+                            preload_fields["preload_frame_count"],
+                            preload_payload_bytes,
+                            SAM3_PRELOAD_MAX_PAYLOAD_BYTES,
+                        )
+                        if _auto_track_diag_enabled():
+                            _auto_track_diag_log(
+                                "sam3_preload_prepared",
+                                functionId=self.id,
+                                frame=frame_index,
+                                diagMeta=diag_meta,
+                                preloadBaseFrame=preload_fields["preload_base_frame"],
+                                preloadFrameCount=preload_fields["preload_frame_count"],
+                                preloadPayloadBytes=preload_payload_bytes,
+                            )
+                        payload.update(preload_fields)
             except BadSignature as ex:
                 raise ValidationError("Invalid or expired tracker state") from ex
         else:
@@ -709,6 +755,35 @@ class LambdaFunction:
         image = frame_provider.get_frame(frame)
 
         return base64.b64encode(image.data.getvalue()).decode("utf-8")
+
+    def _sam3_preload_frame_indices(self, db_job: Job, base_frame: int) -> list[int]:
+        last_frame = db_job.segment.stop_frame
+        if base_frame > last_frame:
+            raise ValidationError(
+                f"SAM3 seed frame {base_frame} is outside job range (last frame {last_frame})",
+                code=status.HTTP_400_BAD_REQUEST,
+            )
+        count = min(SAM3_PRELOAD_CHUNK_CAP, last_frame - base_frame + 1)
+        return list(range(base_frame, base_frame + count))
+
+    def _build_sam3_preload_fields(
+        self,
+        db_task: Task,
+        db_job: Job,
+        base_frame: int,
+    ) -> dict[str, Any]:
+        frame_indices = self._sam3_preload_frame_indices(db_job, base_frame)
+        if not frame_indices:
+            raise ValidationError(
+                "SAM3 preload produced zero frames",
+                code=status.HTTP_400_BAD_REQUEST,
+            )
+        preload_images = [self._get_image(db_task, frame_idx) for frame_idx in frame_indices]
+        return {
+            "preload_images": preload_images,
+            "preload_base_frame": base_frame,
+            "preload_frame_count": len(preload_images),
+        }
 
 
 class LambdaQueue:

@@ -103,6 +103,24 @@
         "httpPort": 49159
       }
     },
+    "meta-sam3-tracker-v4": {
+      "metadata": {
+        "name": "meta-sam3-tracker-v4",
+        "annotations": {
+          "name": "SAM3 Auto Track",
+          "spec": "",
+          "type": "tracker",
+          "supported_shape_types": "rectangle"
+        }
+      },
+      "spec": {
+        "description": "SAM3 bounded preload tracker"
+      },
+      "status": {
+        "state": "ready",
+        "httpPort": 49160
+      }
+    },
     "test-model-has-state-building": {
       "metadata": {
         "name": "test-model-has-state-building",

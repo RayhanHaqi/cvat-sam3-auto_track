@@ -8,7 +8,13 @@ import numpy as np
 from PIL import Image
 
 from diagnostics import log_event, timed_stage
-from model_handler import ModelHandler, SessionStaleError, ValidationError, load_sam3_config
+from model_handler import (
+    ModelHandler,
+    PreloadRangeExhaustedError,
+    SessionStaleError,
+    ValidationError,
+    load_sam3_config,
+)
 
 
 def _set_process_name(name: str) -> None:
@@ -53,6 +59,22 @@ def handler(context, event):
         decode_ms = (time.perf_counter() - decode_start) * 1000.0
         shapes = data.get("shapes") or []
         states = data.get("states") or []
+        preload_images = data.get("preload_images")
+        preload_base_frame = data.get("preload_base_frame")
+        preload_frame_count = data.get("preload_frame_count")
+        frame_index = data.get("frame_index")
+        preload_payload_bytes = None
+        if preload_images is not None:
+            preload_payload_bytes = len(
+                json.dumps(
+                    {
+                        "preload_images": preload_images,
+                        "preload_base_frame": preload_base_frame,
+                        "preload_frame_count": preload_frame_count,
+                    },
+                    default=str,
+                )
+            )
 
         log_event(
             "sam_handler_start",
@@ -60,6 +82,9 @@ def handler(context, event):
             imageDecodeMs=decode_ms,
             shapeCount=len(shapes),
             stateCount=len(states),
+            preloadFrameCount=preload_frame_count,
+            preloadPayloadBytes=preload_payload_bytes,
+            frameIndex=frame_index,
         )
 
         with timed_stage("sam_inference", diagMeta=diag_meta) as stage:
@@ -68,6 +93,11 @@ def handler(context, event):
                 shapes,
                 states,
                 diag_meta=diag_meta,
+                frame_index=frame_index,
+                preload_images=preload_images,
+                preload_base_frame=preload_base_frame,
+                preload_frame_count=preload_frame_count,
+                preload_payload_bytes=preload_payload_bytes,
             )
             stage["samSessionCount"] = len(context.user_data.model._sessions)
 
@@ -94,6 +124,14 @@ def handler(context, event):
             status_code=409,
         )
     except ValidationError as exc:
+        context.logger.warn(str(exc))
+        return context.Response(
+            body=json.dumps({"error": str(exc)}),
+            headers={},
+            content_type="application/json",
+            status_code=400,
+        )
+    except PreloadRangeExhaustedError as exc:
         context.logger.warn(str(exc))
         return context.Response(
             body=json.dumps({"error": str(exc)}),

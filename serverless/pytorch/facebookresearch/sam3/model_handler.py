@@ -1,3 +1,5 @@
+import base64
+import io
 import os
 import shutil
 import tempfile
@@ -411,6 +413,10 @@ class ValidationError(Exception):
     """Raised when the request payload is missing required fields."""
 
 
+class PreloadRangeExhaustedError(Exception):
+    """Raised when tracking requests a frame outside the bounded preload chunk."""
+
+
 def _patch_edt():
     try:
         from sam3.model import edt as edt_module
@@ -518,15 +524,6 @@ class ModelHandler:
         self._close_predictor_session(sess)
         shutil.rmtree(sess["temp_dir"], ignore_errors=True)
 
-    def _save_frame(self, sess, image_array):
-        h, w = image_array.shape[:2]
-        sess["image_height"] = h
-        sess["image_width"] = w
-        idx = sess["frame_count"]
-        frame_path = os.path.join(sess["temp_dir"], f"{idx:05d}.jpg")
-        Image.fromarray(image_array).save(frame_path)
-        sess["frame_count"] += 1
-
     def _output_to_bbox(self, outputs, sess, reference_bbox):
         return select_bbox_from_outputs(
             outputs,
@@ -546,7 +543,16 @@ class ModelHandler:
             stop_on_missing=self.config.ir_stop_on_missing,
         )
 
-    def _build_state(self, sess_key, bbox, prompt_bbox, prev_state=None, lost=False):
+    def _build_state(
+        self,
+        sess_key,
+        bbox,
+        prompt_bbox,
+        prev_state=None,
+        lost=False,
+        *,
+        preload_meta=None,
+    ):
         state = {
             "session_key": sess_key,
             "obj_id": 1 if prev_state is None else prev_state.get("obj_id", 1),
@@ -555,7 +561,74 @@ class ModelHandler:
         }
         if lost:
             state["lost"] = True
+        if preload_meta:
+            state.update(preload_meta)
+        elif prev_state:
+            for key in (
+                "base_frame",
+                "preloaded_count",
+                "preloaded_until_frame",
+                "last_propagated_rel_frame",
+            ):
+                if key in prev_state:
+                    state[key] = prev_state[key]
         return state
+
+    def _preload_state_fields(self, sess, relative_frame):
+        return {
+            "base_frame": sess["base_frame"],
+            "preloaded_count": sess["preloaded_count"],
+            "preloaded_until_frame": sess["preloaded_until_frame"],
+            "last_propagated_rel_frame": relative_frame,
+        }
+
+    def _uses_preload_path(self, preload_images, prev_state):
+        if preload_images is not None:
+            return True
+        if isinstance(prev_state, dict) and prev_state.get("preloaded_count") is not None:
+            return True
+        return False
+
+    def _decode_preload_image(self, image_b64):
+        buf = io.BytesIO(base64.b64decode(image_b64))
+        return np.array(Image.open(buf).convert("RGB"))
+
+    def _save_preload_sequence(self, sess, preload_images_b64, preload_count):
+        count = int(preload_count)
+        if count <= 0:
+            raise ValidationError("preload_frame_count must be positive")
+        if not preload_images_b64 or len(preload_images_b64) < count:
+            raise ValidationError("preload_images length does not match preload_frame_count")
+
+        first_image = self._decode_preload_image(preload_images_b64[0])
+        h, w = first_image.shape[:2]
+        sess["image_height"] = h
+        sess["image_width"] = w
+
+        for idx in range(count):
+            image_array = self._decode_preload_image(preload_images_b64[idx])
+            frame_path = os.path.join(sess["temp_dir"], f"{idx:05d}.jpg")
+            Image.fromarray(image_array).save(frame_path)
+
+        sess["frame_count"] = count
+        sess["loaded_frame_count"] = 0
+        sess["preloaded_session_ready"] = False
+
+    def _load_preloaded_frame(self, sess, relative_frame):
+        frame_path = os.path.join(sess["temp_dir"], f"{int(relative_frame):05d}.jpg")
+        if not os.path.exists(frame_path):
+            raise ValidationError(
+                f"preloaded frame {relative_frame} is missing from session storage"
+            )
+        return np.array(Image.open(frame_path).convert("RGB"))
+
+    def _start_preloaded_session(self, sess):
+        self._close_predictor_session(sess)
+        sess["session_id"] = self._start_session(sess)
+        sess["loaded_frame_count"] = sess["frame_count"]
+        sess["preloaded_session_ready"] = True
+        self._add_prompt(sess, 0)
+        return True
 
     def _first_seed_shape(self, shapes):
         if not shapes:
@@ -571,23 +644,105 @@ class ModelHandler:
         key = states[0].get("session_key")
         if not key or key not in self._sessions:
             return False
+        prev_state = states[0]
+        if prev_state.get("preloaded_count") is not None:
+            return True
         return self._sessions[key]["frame_count"] >= 1
 
-    def infer_batch(self, image, shapes, states, diag_meta=None):
+    def infer_batch(
+        self,
+        image,
+        shapes,
+        states,
+        diag_meta=None,
+        frame_index=None,
+        preload_images=None,
+        preload_base_frame=None,
+        preload_frame_count=None,
+        preload_payload_bytes=None,
+    ):
         shapes = shapes or []
+        prev_state = states[0] if states and isinstance(states[0], dict) else {}
+        if not self._uses_preload_path(preload_images, prev_state):
+            raise ValidationError(
+                "SAM3 tracker requires server-built preload_images on init; re-seed tracking"
+            )
+        return self._infer_batch_preloaded(
+            image,
+            shapes,
+            states,
+            diag_meta=diag_meta,
+            frame_index=frame_index,
+            preload_images=preload_images,
+            preload_base_frame=preload_base_frame,
+            preload_frame_count=preload_frame_count,
+            preload_payload_bytes=preload_payload_bytes,
+        )
+
+    def _infer_batch_preloaded(
+        self,
+        image,
+        shapes,
+        states,
+        diag_meta=None,
+        frame_index=None,
+        preload_images=None,
+        preload_base_frame=None,
+        preload_frame_count=None,
+        preload_payload_bytes=None,
+    ):
         batch_started = time.perf_counter()
         preprocess_started = time.perf_counter()
-        if self._first_seed_shape(shapes) is None and not self._can_continue_without_shapes(states):
-            raise ValidationError("shapes must contain at least one bounding box")
+        prev_state = states[0] if states and isinstance(states[0], dict) else {}
+        is_init = preload_images is not None
 
-        sess_key = self._get_key(states)
-        sess = self._sessions[sess_key]
-        self._save_frame(sess, image)
+        if is_init:
+            if self._first_seed_shape(shapes) is None:
+                raise ValidationError("shapes must contain at least one bounding box")
+            if preload_frame_count is None or preload_base_frame is None:
+                raise ValidationError("preload_base_frame and preload_frame_count are required")
+            if frame_index is None:
+                frame_index = int(preload_base_frame)
+            sess_key = self._get_key(states)
+            sess = self._sessions[sess_key]
+            self._save_preload_sequence(sess, preload_images, preload_frame_count)
+            base_frame = int(preload_base_frame)
+            preloaded_count = int(preload_frame_count)
+            sess["base_frame"] = base_frame
+            sess["preloaded_count"] = preloaded_count
+            sess["preloaded_until_frame"] = base_frame + preloaded_count - 1
+            relative_frame = int(frame_index) - base_frame
+            if relative_frame != 0:
+                raise ValidationError("SAM3 init must start at preload_base_frame")
+            seed_shape = self._first_seed_shape(shapes)
+            sess["prompt_bbox"] = list(seed_shape)
+            sam_session_reloaded = self._start_preloaded_session(sess)
+            propagation_start_frame = 0
+            propagation_frame_count = 1
+        else:
+            if self._first_seed_shape(shapes) is None and not self._can_continue_without_shapes(states):
+                raise ValidationError("shapes must contain at least one bounding box")
+            if frame_index is None:
+                raise ValidationError("frame_index is required for SAM3 track requests")
+            sess_key = self._get_key(states)
+            sess = self._sessions[sess_key]
+            base_frame = int(prev_state.get("base_frame", sess.get("base_frame", 0)))
+            preloaded_count = int(prev_state.get("preloaded_count", sess.get("preloaded_count", 0)))
+            relative_frame = int(frame_index) - base_frame
+            if relative_frame < 0 or relative_frame >= preloaded_count:
+                raise PreloadRangeExhaustedError(
+                    "Preloaded frame range exhausted at frame "
+                    f"{frame_index} (chunk base={base_frame}, count={preloaded_count}); "
+                    "re-seed tracking from a new annotation frame"
+                )
+            if not sess.get("preloaded_session_ready"):
+                raise ValidationError("SAM3 preload session is not ready; re-seed tracking")
+            sam_session_reloaded = False
+            propagation_start_frame = relative_frame
+            propagation_frame_count = 1
+
         preprocess_ms = (time.perf_counter() - preprocess_started) * 1000.0
-
-        current_frame = sess["frame_count"] - 1
-        prev_state = states[0] if states else {}
-        is_init = current_frame == 0
+        refine_image = self._load_preloaded_frame(sess, relative_frame)
 
         def _emit_frame_record(**extra):
             if not diag_enabled():
@@ -603,7 +758,22 @@ class ModelHandler:
                 "geometryConversionMs": extra.get("geometryConversionMs"),
                 "samSessionCount": len(self._sessions),
                 "samMemoryEntryCount": len(self._sessions),
-                "samTrackedObjectCount": sess.get("frame_count"),
+                "samTrackedObjectCount": sess.get("preloaded_count"),
+                "preloadedFrameCount": sess.get("preloaded_count"),
+                "relativeFrame": relative_frame,
+                "preloadPayloadBytes": preload_payload_bytes,
+                "samSessionReloaded": extra.get(
+                    "samSessionReloaded",
+                    sam_session_reloaded,
+                ),
+                "propagationStartFrame": extra.get(
+                    "propagationStartFrame",
+                    propagation_start_frame,
+                ),
+                "propagationFrameCount": extra.get(
+                    "propagationFrameCount",
+                    propagation_frame_count,
+                ),
                 "rawSamOutput": extra.get("rawSamOutput"),
                 "selectedCandidate": extra.get("selectedCandidate"),
                 "postRefineCandidate": extra.get("postRefineCandidate"),
@@ -613,11 +783,6 @@ class ModelHandler:
             })
 
         if is_init:
-            seed_shape = self._first_seed_shape(shapes)
-            if seed_shape is None:
-                raise ValidationError("shapes must contain at least one bounding box")
-            sess["prompt_bbox"] = list(seed_shape)
-            self._ensure_session(sess)
             infer_started = time.perf_counter()
             result = self._propagate_frame(sess, 0, 0)
             sam_inference_ms = (time.perf_counter() - infer_started) * 1000.0
@@ -630,12 +795,17 @@ class ModelHandler:
             if bbox is None:
                 bbox = reference_bbox
             refine_started = time.perf_counter()
-            bbox = self._maybe_refine_bbox(image, bbox)
+            bbox = self._maybe_refine_bbox(refine_image, bbox)
             if bbox is None:
                 bbox = reference_bbox
             post_refine_summary = bbox_summary(bbox)
             postprocess_ms = (time.perf_counter() - refine_started) * 1000.0
-            out_state = self._build_state(sess_key, bbox, sess["prompt_bbox"])
+            out_state = self._build_state(
+                sess_key,
+                bbox,
+                sess["prompt_bbox"],
+                preload_meta=self._preload_state_fields(sess, relative_frame),
+            )
             _emit_frame_record(
                 samInferenceMs=sam_inference_ms,
                 samPostprocessMs=postprocess_ms,
@@ -644,17 +814,30 @@ class ModelHandler:
                 selectedCandidate=selected_summary,
                 postRefineCandidate=post_refine_summary,
                 committedCandidate=bbox_summary(bbox),
+                samSessionReloaded=sam_session_reloaded,
+                propagationStartFrame=propagation_start_frame,
+                propagationFrameCount=propagation_frame_count,
             )
             return [bbox], [out_state]
 
         if prev_state.get("lost"):
             out_state = self._build_state(
-                sess_key, None, sess.get("prompt_bbox"), prev_state=prev_state, lost=True,
+                sess_key,
+                None,
+                sess.get("prompt_bbox"),
+                prev_state=prev_state,
+                lost=True,
             )
-            _emit_frame_record(lost=True, committedCandidate=None)
+            _emit_frame_record(
+                lost=True,
+                committedCandidate=None,
+                samSessionReloaded=False,
+                propagationStartFrame=propagation_start_frame,
+                propagationFrameCount=propagation_frame_count,
+            )
             return [None], [out_state]
 
-        prompt_bbox = sess["prompt_bbox"]
+        prompt_bbox = sess.get("prompt_bbox") or prev_state.get("prompt_bbox")
         seed_shape = self._first_seed_shape(shapes)
         if prompt_bbox is None and seed_shape is not None:
             sess["prompt_bbox"] = list(seed_shape)
@@ -662,7 +845,7 @@ class ModelHandler:
 
         last_known_bbox = prev_state.get("last_bbox", prompt_bbox)
         infer_started = time.perf_counter()
-        result = self._track_frame(sess, current_frame)
+        result = self._propagate_frame(sess, relative_frame, relative_frame)
         sam_inference_ms = (time.perf_counter() - infer_started) * 1000.0
         geom_started = time.perf_counter()
         raw_summary = summarize_outputs(result, sess["image_height"], sess["image_width"])
@@ -671,7 +854,12 @@ class ModelHandler:
         geometry_ms = (time.perf_counter() - geom_started) * 1000.0
         if bbox is None:
             out_state = self._build_state(
-                sess_key, None, prompt_bbox, prev_state=prev_state, lost=True,
+                sess_key,
+                None,
+                prompt_bbox,
+                prev_state=prev_state,
+                lost=True,
+                preload_meta=self._preload_state_fields(sess, relative_frame),
             )
             _emit_frame_record(
                 samInferenceMs=sam_inference_ms,
@@ -679,16 +867,24 @@ class ModelHandler:
                 rawSamOutput=raw_summary,
                 selectedCandidate=None,
                 lost=True,
+                samSessionReloaded=False,
+                propagationStartFrame=propagation_start_frame,
+                propagationFrameCount=propagation_frame_count,
             )
             return [None], [out_state]
 
         refine_started = time.perf_counter()
-        bbox = self._maybe_refine_bbox(image, bbox, previous_bbox=last_known_bbox)
+        bbox = self._maybe_refine_bbox(refine_image, bbox, previous_bbox=last_known_bbox)
         post_refine_summary = bbox_summary(bbox)
         postprocess_ms = (time.perf_counter() - refine_started) * 1000.0
         if bbox is None:
             out_state = self._build_state(
-                sess_key, None, prompt_bbox, prev_state=prev_state, lost=True,
+                sess_key,
+                None,
+                prompt_bbox,
+                prev_state=prev_state,
+                lost=True,
+                preload_meta=self._preload_state_fields(sess, relative_frame),
             )
             _emit_frame_record(
                 samInferenceMs=sam_inference_ms,
@@ -698,6 +894,9 @@ class ModelHandler:
                 selectedCandidate=selected_summary,
                 postRefineCandidate=None,
                 lost=True,
+                samSessionReloaded=False,
+                propagationStartFrame=propagation_start_frame,
+                propagationFrameCount=propagation_frame_count,
             )
             return [None], [out_state]
 
@@ -708,7 +907,12 @@ class ModelHandler:
             and not _bboxes_near(last_known_bbox, prompt_bbox)
         ):
             out_state = self._build_state(
-                sess_key, None, prompt_bbox, prev_state=prev_state, lost=True,
+                sess_key,
+                None,
+                prompt_bbox,
+                prev_state=prev_state,
+                lost=True,
+                preload_meta=self._preload_state_fields(sess, relative_frame),
             )
             _emit_frame_record(
                 samInferenceMs=sam_inference_ms,
@@ -718,10 +922,19 @@ class ModelHandler:
                 selectedCandidate=selected_summary,
                 postRefineCandidate=post_refine_summary,
                 lost=True,
+                samSessionReloaded=False,
+                propagationStartFrame=propagation_start_frame,
+                propagationFrameCount=propagation_frame_count,
             )
             return [None], [out_state]
 
-        new_state = self._build_state(sess_key, bbox, prompt_bbox, prev_state=prev_state)
+        new_state = self._build_state(
+            sess_key,
+            bbox,
+            prompt_bbox,
+            prev_state=prev_state,
+            preload_meta=self._preload_state_fields(sess, relative_frame),
+        )
         _emit_frame_record(
             samInferenceMs=sam_inference_ms,
             samPostprocessMs=postprocess_ms,
@@ -730,30 +943,11 @@ class ModelHandler:
             selectedCandidate=selected_summary,
             postRefineCandidate=post_refine_summary,
             committedCandidate=bbox_summary(bbox),
+            samSessionReloaded=False,
+            propagationStartFrame=propagation_start_frame,
+            propagationFrameCount=propagation_frame_count,
         )
         return [bbox], [new_state]
-
-    def _track_frame(self, sess, current_frame):
-        """Propagate to current_frame; reload when CVAT appended a new JPEG."""
-        if sess["loaded_frame_count"] != sess["frame_count"]:
-            self._reload_session(sess)
-
-        result = self._propagate_frame(sess, 0, current_frame)
-        if result is None:
-            self._reload_session(sess)
-            result = self._propagate_frame(sess, 0, current_frame)
-        return result
-
-    def _reload_session(self, sess):
-        self._close_predictor_session(sess)
-        sess["session_id"] = self._start_session(sess)
-        sess["loaded_frame_count"] = sess["frame_count"]
-        self._add_prompt(sess, 0)
-
-    def _ensure_session(self, sess):
-        if sess["session_id"] and sess["loaded_frame_count"] == sess["frame_count"]:
-            return
-        self._reload_session(sess)
 
     def _start_session(self, sess):
         response = self.predictor.handle_request(request={
