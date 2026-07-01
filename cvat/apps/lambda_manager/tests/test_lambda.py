@@ -952,7 +952,7 @@ class LambdaTestCases(_LambdaTestCaseBase):
         ):
             with mock.patch(
                 "cvat.apps.lambda_manager.views.LambdaFunction._sam3_preload_frame_indices",
-                return_value=[10, 11, 12],
+                return_value=[1, 2],
             ):
                 with mock.patch(
                     "cvat.apps.lambda_manager.views.LambdaGateway.invoke",
@@ -963,29 +963,33 @@ class LambdaTestCases(_LambdaTestCaseBase):
                         self.admin,
                         data={
                             "job": job.id,
-                            "frame": 10,
+                            "frame": 1,
                             "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
                         },
                     )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         sam3_init_payload = captured[-1][1]
-        self.assertEqual(sam3_init_payload["preload_base_frame"], 10)
-        self.assertEqual(sam3_init_payload["preload_frame_count"], 3)
-        self.assertEqual(sam3_init_payload["frame_index"], 10)
+        self.assertEqual(sam3_init_payload["preload_base_frame"], 1)
+        self.assertEqual(sam3_init_payload["preload_frame_count"], 2)
+        self.assertEqual(sam3_init_payload["frame_index"], 1)
 
         with mock.patch(
-            "cvat.apps.lambda_manager.views.LambdaGateway.invoke",
-            side_effect=capture_invoke,
+            "cvat.apps.lambda_manager.views.LambdaFunction._get_image",
+            return_value=frame_b64,
         ):
-            boundary_response = self._post_request(
-                f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
-                self.admin,
-                data={
-                    "job": job.id,
-                    "frame": 2,
-                    "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
-                },
-            )
+            with mock.patch(
+                "cvat.apps.lambda_manager.views.LambdaGateway.invoke",
+                side_effect=capture_invoke,
+            ):
+                boundary_response = self._post_request(
+                    f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
+                    self.admin,
+                    data={
+                        "job": job.id,
+                        "frame": 2,
+                        "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
+                    },
+                )
         self.assertEqual(boundary_response.status_code, status.HTTP_200_OK)
         boundary_payload = captured[-1][1]
         self.assertEqual(boundary_payload["preload_base_frame"], 2)
