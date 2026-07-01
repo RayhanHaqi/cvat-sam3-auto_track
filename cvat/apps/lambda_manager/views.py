@@ -591,6 +591,14 @@ class LambdaFunction:
                         states = data["states"]
                         shapes = data["shapes"]
 
+                    if is_sam3_tracker and is_init:
+                        if db_job is None:
+                            raise ValidationError(
+                                "SAM3 bounded preload requires a job context",
+                                code=status.HTTP_400_BAD_REQUEST,
+                            )
+                        self._assert_sam3_contiguous_range_job(db_job)
+
                     payload.update(
                         {
                             "image": self._get_image(db_task, frame_index),
@@ -609,11 +617,6 @@ class LambdaFunction:
                     )
                     if is_sam3_tracker and is_init:
                         payload["frame_index"] = frame_index
-                        if db_job is None:
-                            raise ValidationError(
-                                "SAM3 bounded preload requires a job context",
-                                code=status.HTTP_400_BAD_REQUEST,
-                            )
                         payload.update(
                             self._build_sam3_preload_fields(
                                 db_task,
@@ -784,14 +787,17 @@ class LambdaFunction:
 
         return base64.b64encode(image.data.getvalue()).decode("utf-8")
 
-    def _sam3_preload_frame_indices(self, db_job: Job, base_frame: int) -> list[int]:
-        segment = db_job.segment
-        if segment.type == SegmentType.SPECIFIC_FRAMES:
+    def _assert_sam3_contiguous_range_job(self, db_job: Job) -> None:
+        if db_job.segment.type == SegmentType.SPECIFIC_FRAMES:
             raise ValidationError(
                 "SAM3 cached tracking currently requires a contiguous-range job; "
                 "specific-frame jobs are not supported.",
                 code=status.HTTP_400_BAD_REQUEST,
             )
+
+    def _sam3_preload_frame_indices(self, db_job: Job, base_frame: int) -> list[int]:
+        self._assert_sam3_contiguous_range_job(db_job)
+        segment = db_job.segment
         last_frame = segment.stop_frame
         if base_frame > last_frame:
             raise ValidationError(

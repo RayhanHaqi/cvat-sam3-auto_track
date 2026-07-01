@@ -914,20 +914,24 @@ class LambdaTestCases(_LambdaTestCaseBase):
         segment.save()
         try:
             with mock.patch(
-                "cvat.apps.lambda_manager.views.LambdaGateway.invoke",
-                side_effect=capture_invoke,
-            ):
-                response = self._post_request(
-                    f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
-                    self.admin,
-                    data={
-                        "job": job.id,
-                        "frame": 0,
-                        "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
-                    },
-                )
+                "cvat.apps.lambda_manager.views.LambdaFunction._get_image",
+            ) as get_image_mock:
+                with mock.patch(
+                    "cvat.apps.lambda_manager.views.LambdaGateway.invoke",
+                    side_effect=capture_invoke,
+                ):
+                    response = self._post_request(
+                        f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
+                        self.admin,
+                        data={
+                            "job": job.id,
+                            "frame": 0,
+                            "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
+                        },
+                    )
             self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
             self.assertIn("contiguous-range", response.content.decode("UTF-8"))
+            get_image_mock.assert_not_called()
             self.assertEqual(captured, [])
         finally:
             segment.type = original_type
