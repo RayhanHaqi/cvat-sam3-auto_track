@@ -87,6 +87,15 @@ def _auto_track_diag_log(event_name: str, **fields: Any) -> None:
     slogger.glob.info("AUTO_TRACK_DIAG %s", json.dumps(record, default=str))
 
 
+SAM3_TRACKER_FUNCTION_ID = "meta-sam3-tracker-v4"
+SAM3_PRELOAD_CHUNK_CAP = 96
+SAM3_NUCLIO_MAX_REQUEST_BODY_BYTES = 268_435_456
+SAM3_PRELOAD_MAX_PAYLOAD_BYTES = 240 * 1024 * 1024
+
+
+def measure_sam3_nuclio_payload_bytes(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, default=str).encode("utf-8"))
+
 
 class LambdaGateway:
     NUCLIO_ROOT_URL = "/api/functions"
@@ -539,42 +548,78 @@ class LambdaFunction:
                 return shape
 
             try:
-                if "states" not in data:
-                    # initializing tracking
-                    shapes = mandatory_arg("shapes")
-                    states = []
-                elif "shapes" not in data:
-                    # continuing tracking
+                frame_index = mandatory_arg("frame")
+                is_sam3_tracker = self.id == SAM3_TRACKER_FUNCTION_ID
+                is_init = "states" not in data
+
+                if is_sam3_tracker and not is_init:
                     states = mandatory_arg("states")
-
-                    # Previously, the UI used to pass the previous-frame shapes when continuing
-                    # tracking. It doesn't do that anymore, but to support old tracking functions
-                    # that rely on the length of the "shapes" array, we'll pad it out with nulls.
-                    # If a function relies on the _contents_ of the "shapes" array, it will not
-                    # work anymore.
-                    shapes = [None] * len(states)
-                else:
-                    # We should not normally get here, but it's possible if e.g. someone is still
-                    # running an old UI version.
-                    states = data["states"]
-                    shapes = data["shapes"]
-
-                payload.update(
-                    {
-                        "image": self._get_image(db_task, mandatory_arg("frame")),
-                        "shapes": list(map(prepare_shape, shapes)),
-                        "states": [
-                            (
-                                None
-                                if state is None
-                                else json.loads(
-                                    signer.unsign(state, max_age=self.TRACKER_STATE_MAX_AGE)
+                    payload.update(
+                        {
+                            "states": [
+                                (
+                                    None
+                                    if state is None
+                                    else json.loads(
+                                        signer.unsign(state, max_age=self.TRACKER_STATE_MAX_AGE)
+                                    )
                                 )
+                                for state in states
+                            ],
+                            "frame_index": frame_index,
+                        }
+                    )
+                else:
+                    if "states" not in data:
+                        # initializing tracking
+                        shapes = mandatory_arg("shapes")
+                        states = []
+                    elif "shapes" not in data:
+                        # continuing tracking
+                        states = mandatory_arg("states")
+
+                        # Previously, the UI used to pass the previous-frame shapes when continuing
+                        # tracking. It doesn't do that anymore, but to support old tracking functions
+                        # that rely on the length of the "shapes" array, we'll pad it out with nulls.
+                        # If a function relies on the _contents_ of the "shapes" array, it will not
+                        # work anymore.
+                        shapes = [None] * len(states)
+                    else:
+                        # We should not normally get here, but it's possible if e.g. someone is still
+                        # running an old UI version.
+                        states = data["states"]
+                        shapes = data["shapes"]
+
+                    payload.update(
+                        {
+                            "image": self._get_image(db_task, frame_index),
+                            "shapes": list(map(prepare_shape, shapes)),
+                            "states": [
+                                (
+                                    None
+                                    if state is None
+                                    else json.loads(
+                                        signer.unsign(state, max_age=self.TRACKER_STATE_MAX_AGE)
+                                    )
+                                )
+                                for state in states
+                            ],
+                        }
+                    )
+                    if is_sam3_tracker and is_init:
+                        payload["frame_index"] = frame_index
+                        if db_job is None:
+                            raise ValidationError(
+                                "SAM3 bounded preload requires a job context",
+                                code=status.HTTP_400_BAD_REQUEST,
                             )
-                            for state in states
-                        ],
-                    }
-                )
+                        payload.update(
+                            self._build_sam3_preload_fields(
+                                db_task,
+                                db_job,
+                                frame_index,
+                            )
+                        )
             except BadSignature as ex:
                 raise ValidationError("Invalid or expired tracker state") from ex
         else:
@@ -602,6 +647,34 @@ class LambdaFunction:
 
         if diag_meta and _auto_track_diag_enabled():
             payload["_autoTrackDiag"] = diag_meta
+
+        if self.id == SAM3_TRACKER_FUNCTION_ID and "states" not in data:
+            nuclio_payload_bytes = measure_sam3_nuclio_payload_bytes(payload)
+            if nuclio_payload_bytes > SAM3_PRELOAD_MAX_PAYLOAD_BYTES:
+                raise ValidationError(
+                    "SAM3 preload payload size "
+                    f"{nuclio_payload_bytes} bytes exceeds limit "
+                    f"({SAM3_PRELOAD_MAX_PAYLOAD_BYTES} bytes); "
+                    "reduce chunk cap or image quality",
+                    code=status.HTTP_400_BAD_REQUEST,
+                )
+            slogger.glob.info(
+                "SAM3 preload prepared: base_frame=%s count=%s nuclio_payload_bytes=%s limit=%s",
+                payload.get("preload_base_frame"),
+                payload.get("preload_frame_count"),
+                nuclio_payload_bytes,
+                SAM3_PRELOAD_MAX_PAYLOAD_BYTES,
+            )
+            if _auto_track_diag_enabled():
+                _auto_track_diag_log(
+                    "sam3_preload_prepared",
+                    functionId=self.id,
+                    frame=data.get("frame"),
+                    diagMeta=diag_meta,
+                    preloadBaseFrame=payload.get("preload_base_frame"),
+                    preloadFrameCount=payload.get("preload_frame_count"),
+                    preloadPayloadBytes=nuclio_payload_bytes,
+                )
 
         response = self.gateway.invoke(self, payload)
 
@@ -709,6 +782,35 @@ class LambdaFunction:
         image = frame_provider.get_frame(frame)
 
         return base64.b64encode(image.data.getvalue()).decode("utf-8")
+
+    def _sam3_preload_frame_indices(self, db_job: Job, base_frame: int) -> list[int]:
+        last_frame = db_job.segment.stop_frame
+        if base_frame > last_frame:
+            raise ValidationError(
+                f"SAM3 seed frame {base_frame} is outside job range (last frame {last_frame})",
+                code=status.HTTP_400_BAD_REQUEST,
+            )
+        count = min(SAM3_PRELOAD_CHUNK_CAP, last_frame - base_frame + 1)
+        return list(range(base_frame, base_frame + count))
+
+    def _build_sam3_preload_fields(
+        self,
+        db_task: Task,
+        db_job: Job,
+        base_frame: int,
+    ) -> dict[str, Any]:
+        frame_indices = self._sam3_preload_frame_indices(db_job, base_frame)
+        if not frame_indices:
+            raise ValidationError(
+                "SAM3 preload produced zero frames",
+                code=status.HTTP_400_BAD_REQUEST,
+            )
+        preload_images = [self._get_image(db_task, frame_idx) for frame_idx in frame_indices]
+        return {
+            "preload_images": preload_images,
+            "preload_base_frame": base_frame,
+            "preload_frame_count": len(preload_images),
+        }
 
 
 class LambdaQueue:

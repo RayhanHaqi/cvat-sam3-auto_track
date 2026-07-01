@@ -35,6 +35,7 @@ id_function_reid_with_no_response_data = (
 id_function_interactor = "test-openvino-dextr"
 id_function_tracker = "test-pth-foolwood-siammask"
 id_function_tracker_with_supported_shape_types = "test-tracker-with-supported-shape-types"
+id_function_sam3_tracker = "meta-sam3-tracker-v4"
 id_function_non_type = "test-model-has-non-type"
 id_function_wrong_type = "test-model-has-wrong-type"
 id_function_unknown_type = "test-model-has-unknown-type"
@@ -778,6 +779,105 @@ class LambdaTestCases(_LambdaTestCaseBase):
                 f"{LAMBDA_FUNCTIONS_PATH}/{id_func}", None, data=data_main_task
             )
             self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_sam3_tracker_preload_payloads_and_generic_tracker_unchanged(self):
+        from cvat.apps.engine.models import Job
+        from cvat.apps.lambda_manager.views import measure_sam3_nuclio_payload_bytes
+
+        captured = []
+
+        def capture_invoke(func, payload):
+            captured.append((func.id, dict(payload)))
+            return self._invoke_function(func, payload)
+
+        job = Job.objects.get(segment__task_id=self.main_task["id"])
+        init_data = {
+            "job": job.id,
+            "frame": 0,
+            "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
+        }
+        generic_init = {
+            "task": self.main_task["id"],
+            "frame": 0,
+            "shapes": [{"type": "rectangle", "points": [12.12, 34.45, 54.0, 76.12]}],
+        }
+
+        with mock.patch(
+            "cvat.apps.lambda_manager.views.LambdaGateway.invoke",
+            side_effect=capture_invoke,
+        ):
+            response = self._post_request(
+                f"{LAMBDA_FUNCTIONS_PATH}/{id_function_tracker}",
+                self.admin,
+                data=generic_init,
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            generic_payload = captured[-1][1]
+            self.assertIn("image", generic_payload)
+            self.assertNotIn("preload_images", generic_payload)
+
+            response = self._post_request(
+                f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
+                self.admin,
+                data=init_data,
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            sam3_init_payload = captured[-1][1]
+            self.assertIn("image", sam3_init_payload)
+            self.assertIn("preload_images", sam3_init_payload)
+            self.assertIn("preload_base_frame", sam3_init_payload)
+            self.assertIn("preload_frame_count", sam3_init_payload)
+            self.assertEqual(sam3_init_payload["frame_index"], 0)
+            self.assertEqual(sam3_init_payload["preload_frame_count"], 3)
+            full_bytes = measure_sam3_nuclio_payload_bytes(sam3_init_payload)
+            preload_only = len(
+                json.dumps(
+                    {
+                        "preload_images": sam3_init_payload["preload_images"],
+                        "preload_base_frame": sam3_init_payload["preload_base_frame"],
+                        "preload_frame_count": sam3_init_payload["preload_frame_count"],
+                    }
+                ).encode("utf-8")
+            )
+            self.assertGreater(full_bytes, preload_only)
+
+            continue_data = {
+                "job": job.id,
+                "frame": 1,
+                "states": response.data["states"],
+            }
+            response = self._post_request(
+                f"{LAMBDA_FUNCTIONS_PATH}/{id_function_sam3_tracker}",
+                self.admin,
+                data=continue_data,
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            sam3_continue_payload = captured[-1][1]
+            self.assertNotIn("image", sam3_continue_payload)
+            self.assertNotIn("shapes", sam3_continue_payload)
+            self.assertNotIn("preload_images", sam3_continue_payload)
+            self.assertEqual(sam3_continue_payload["frame_index"], 1)
+            self.assertIn("states", sam3_continue_payload)
+
+    def test_sam3_nuclio_payload_bytes_guard_uses_full_body(self):
+        from cvat.apps.lambda_manager.views import measure_sam3_nuclio_payload_bytes
+
+        preload_fields = {
+            "preload_images": ["Zm9v"],
+            "preload_base_frame": 0,
+            "preload_frame_count": 1,
+        }
+        preload_only = len(json.dumps(preload_fields).encode("utf-8"))
+        full_payload = {
+            "image": "YmFy",
+            "shapes": [[1.0, 2.0, 3.0, 4.0]],
+            "states": [],
+            "frame_index": 0,
+            "_autoTrackDiag": {"requestId": "req-1", "sessionId": "sess-1"},
+            **preload_fields,
+        }
+        full_bytes = measure_sam3_nuclio_payload_bytes(full_payload)
+        self.assertGreater(full_bytes, preload_only)
 
     def test_api_v2_lambda_functions_create_tracker_bad_signature(self):
         signer = TimestampSigner(key="bad key")

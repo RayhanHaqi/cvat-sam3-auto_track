@@ -1,4 +1,4 @@
-"""Unit tests for SAM3 lost-target / null bbox continuation (no GPU)."""
+"""Unit tests for SAM3 lost-target / null bbox with preload cache (no GPU)."""
 
 import importlib.util
 import sys
@@ -20,27 +20,38 @@ load_sam3_config = _mod.load_sam3_config
 refine_bbox_with_ir_intensity = _mod.refine_bbox_with_ir_intensity
 
 
-def _continue_handler(output_bbox):
+def _cached_handler(frame_cache, *, prev_lost=False, preloaded_count=96):
     handler = ModelHandler.__new__(ModelHandler)
     handler.config = Sam3Config(ir_refine_enabled=False)
+    handler.predictor = SimpleNamespace(
+        handle_stream_request=lambda *_args, **_kwargs: iter([]),
+        handle_request=lambda *_args, **_kwargs: {},
+    )
     key = "test_sess"
     handler._sessions = {
         key: {
-            "frame_count": 1,
+            "temp_dir": None,
             "prompt_bbox": [10.0, 10.0, 30.0, 30.0],
             "image_height": 100,
             "image_width": 100,
+            "base_frame": 0,
+            "preloaded_count": preloaded_count,
+            "preloaded_until_frame": preloaded_count - 1,
+            "frame_cache": frame_cache,
+            "cache_ready": True,
         },
     }
-
-    def _save_frame(sess, _image):
-        sess["frame_count"] += 1
-
-    handler._save_frame = _save_frame
-    handler._track_frame = lambda _sess, _frame: {}
-    handler._output_to_bbox = lambda *_args, **_kwargs: output_bbox
-    handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
-    return handler, key
+    prev_state = {
+        "session_key": key,
+        "last_bbox": [10.0, 10.0, 30.0, 30.0],
+        "base_frame": 0,
+        "preloaded_count": preloaded_count,
+        "preloaded_until_frame": preloaded_count - 1,
+    }
+    if prev_lost:
+        prev_state["lost"] = True
+        prev_state["last_bbox"] = None
+    return handler, key, prev_state
 
 
 def test_load_sam3_config_ir_stop_on_missing():
@@ -48,13 +59,14 @@ def test_load_sam3_config_ir_stop_on_missing():
     assert cfg.ir_stop_on_missing is True
 
 
-def test_continue_returns_none_when_sam_output_missing():
-    handler, key = _continue_handler(None)
-    image = np.zeros((100, 100, 3), dtype=np.uint8)
+def test_continue_returns_none_when_cached_entry_lost():
+    cache = {1: {"bbox": None, "lost": True}}
+    handler, _key, prev_state = _cached_handler(cache)
     shapes, states = handler.infer_batch(
-        image,
+        None,
         [None],
-        [{"session_key": key, "last_bbox": [10.0, 10.0, 30.0, 30.0]}],
+        [prev_state],
+        frame_index=1,
     )
     assert shapes == [None]
     assert states[0]["lost"] is True
@@ -62,12 +74,13 @@ def test_continue_returns_none_when_sam_output_missing():
 
 def test_continue_accepts_backend_padded_null_shapes():
     expected = [12.0, 12.0, 32.0, 32.0]
-    handler, key = _continue_handler(expected)
-    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    cache = {1: {"bbox": expected, "lost": False}}
+    handler, _key, prev_state = _cached_handler(cache)
     shapes, states = handler.infer_batch(
-        image,
+        None,
         [None],
-        [{"session_key": key, "last_bbox": [10.0, 10.0, 30.0, 30.0]}],
+        [prev_state],
+        frame_index=1,
     )
     assert shapes == [expected]
     assert states[0]["last_bbox"] == expected
@@ -75,26 +88,13 @@ def test_continue_accepts_backend_padded_null_shapes():
 
 
 def test_continue_returns_none_when_prior_state_lost():
-    handler, key = _continue_handler([50.0, 50.0, 70.0, 70.0])
-    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    cache = {1: {"bbox": [50.0, 50.0, 70.0, 70.0], "lost": False}}
+    handler, _key, prev_state = _cached_handler(cache, prev_lost=True)
     shapes, states = handler.infer_batch(
-        image,
+        None,
         [None],
-        [{"session_key": key, "last_bbox": None, "lost": True}],
-    )
-    assert shapes == [None]
-    assert states[0]["lost"] is True
-
-
-def test_continue_returns_none_when_sam_snaps_back_to_seed():
-    seed = [10.0, 10.0, 30.0, 30.0]
-    moved = [50.0, 50.0, 70.0, 70.0]
-    handler, key = _continue_handler(seed)
-    image = np.zeros((100, 100, 3), dtype=np.uint8)
-    shapes, states = handler.infer_batch(
-        image,
-        [None],
-        [{"session_key": key, "last_bbox": moved}],
+        [prev_state],
+        frame_index=1,
     )
     assert shapes == [None]
     assert states[0]["lost"] is True
@@ -104,54 +104,70 @@ def test_init_rejects_all_null_shapes_without_session():
     handler = ModelHandler.__new__(ModelHandler)
     handler.config = Sam3Config(ir_refine_enabled=False)
     handler._sessions = {}
-    image = np.zeros((100, 100, 3), dtype=np.uint8)
     with pytest.raises(ValidationError, match="bounding box"):
-        handler.infer_batch(image, [None], [{}])
+        handler.infer_batch(
+            None,
+            [None],
+            [{}],
+            preload_images=["Zm9v"],
+            preload_base_frame=0,
+            preload_frame_count=1,
+        )
 
 
 def test_init_uses_seed_bbox_when_sam_output_missing():
+    preload_count = 1
     handler = ModelHandler.__new__(ModelHandler)
     handler.config = Sam3Config(ir_refine_enabled=False)
+    handler.predictor = SimpleNamespace(
+        handle_stream_request=lambda request: iter([
+            {"frame_index": 0, "outputs": {}},
+        ]),
+        handle_request=lambda request: (
+            {"session_id": "fake"} if request["type"] == "start_session" else {}
+        ),
+    )
     key = "init_sess"
+    import tempfile
+    temp_dir = tempfile.mkdtemp(prefix="sam3_test_")
     handler._sessions = {
         key: {
+            "temp_dir": temp_dir,
             "frame_count": 0,
+            "loaded_frame_count": 0,
+            "session_id": None,
             "prompt_bbox": None,
-            "image_height": 100,
-            "image_width": 100,
+            "image_height": None,
+            "image_width": None,
+            "base_frame": None,
+            "preloaded_count": 0,
+            "preloaded_until_frame": None,
+            "frame_cache": {},
+            "cache_ready": False,
         },
     }
-
-    def _save_frame(sess, _image):
-        sess["frame_count"] += 1
-        sess["image_height"] = 100
-        sess["image_width"] = 100
-
-    handler._save_frame = _save_frame
-    handler._ensure_session = lambda _sess: None
-    handler._propagate_frame = lambda *_args: {}
     handler._output_to_bbox = lambda *_args, **_kwargs: None
     handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
 
+    import base64
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8)).save(buf, format="JPEG")
+    preload_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
     seed = [10.0, 10.0, 30.0, 30.0]
-    image = np.zeros((100, 100, 3), dtype=np.uint8)
-    shapes, states = handler.infer_batch(image, [seed], [{"session_key": key}])
+    shapes, states = handler.infer_batch(
+        None,
+        [seed],
+        [{"session_key": key}],
+        frame_index=0,
+        preload_images=[preload_b64],
+        preload_base_frame=0,
+        preload_frame_count=preload_count,
+    )
     assert shapes == [seed]
     assert states[0].get("lost") is not True
-
-
-def test_continue_returns_none_when_ir_stop_on_missing():
-    handler, key = _continue_handler([90.0, 90.0, 110.0, 110.0])
-    handler.config = Sam3Config(ir_refine_enabled=True, ir_stop_on_missing=True)
-    handler._maybe_refine_bbox = _mod.ModelHandler._maybe_refine_bbox.__get__(handler, ModelHandler)
-    image = np.full((200, 200, 3), 20, dtype=np.uint8)
-    shapes, states = handler.infer_batch(
-        image,
-        [None],
-        [{"session_key": key, "last_bbox": [90.0, 90.0, 110.0, 110.0]}],
-    )
-    assert shapes == [None]
-    assert states[0]["lost"] is True
 
 
 def test_refine_stop_on_missing_returns_none_without_support():
