@@ -93,6 +93,10 @@ SAM3_NUCLIO_MAX_REQUEST_BODY_BYTES = 268_435_456
 SAM3_PRELOAD_MAX_PAYLOAD_BYTES = 240 * 1024 * 1024
 
 
+def measure_sam3_nuclio_payload_bytes(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, default=str).encode("utf-8"))
+
+
 class LambdaGateway:
     NUCLIO_ROOT_URL = "/api/functions"
 
@@ -594,32 +598,6 @@ class LambdaFunction:
                             db_job,
                             frame_index,
                         )
-                        preload_payload_bytes = len(json.dumps(preload_fields))
-                        if preload_payload_bytes > SAM3_PRELOAD_MAX_PAYLOAD_BYTES:
-                            raise ValidationError(
-                                "SAM3 preload payload size "
-                                f"{preload_payload_bytes} bytes exceeds limit "
-                                f"({SAM3_PRELOAD_MAX_PAYLOAD_BYTES} bytes); "
-                                "reduce chunk cap or image quality",
-                                code=status.HTTP_400_BAD_REQUEST,
-                            )
-                        slogger.glob.info(
-                            "SAM3 preload prepared: base_frame=%s count=%s payload_bytes=%s limit=%s",
-                            preload_fields["preload_base_frame"],
-                            preload_fields["preload_frame_count"],
-                            preload_payload_bytes,
-                            SAM3_PRELOAD_MAX_PAYLOAD_BYTES,
-                        )
-                        if _auto_track_diag_enabled():
-                            _auto_track_diag_log(
-                                "sam3_preload_prepared",
-                                functionId=self.id,
-                                frame=frame_index,
-                                diagMeta=diag_meta,
-                                preloadBaseFrame=preload_fields["preload_base_frame"],
-                                preloadFrameCount=preload_fields["preload_frame_count"],
-                                preloadPayloadBytes=preload_payload_bytes,
-                            )
                         payload.update(preload_fields)
             except BadSignature as ex:
                 raise ValidationError("Invalid or expired tracker state") from ex
@@ -648,6 +626,34 @@ class LambdaFunction:
 
         if diag_meta and _auto_track_diag_enabled():
             payload["_autoTrackDiag"] = diag_meta
+
+        if self.id == SAM3_TRACKER_FUNCTION_ID and "states" not in data:
+            nuclio_payload_bytes = measure_sam3_nuclio_payload_bytes(payload)
+            if nuclio_payload_bytes > SAM3_PRELOAD_MAX_PAYLOAD_BYTES:
+                raise ValidationError(
+                    "SAM3 preload payload size "
+                    f"{nuclio_payload_bytes} bytes exceeds limit "
+                    f"({SAM3_PRELOAD_MAX_PAYLOAD_BYTES} bytes); "
+                    "reduce chunk cap or image quality",
+                    code=status.HTTP_400_BAD_REQUEST,
+                )
+            slogger.glob.info(
+                "SAM3 preload prepared: base_frame=%s count=%s nuclio_payload_bytes=%s limit=%s",
+                payload.get("preload_base_frame"),
+                payload.get("preload_frame_count"),
+                nuclio_payload_bytes,
+                SAM3_PRELOAD_MAX_PAYLOAD_BYTES,
+            )
+            if _auto_track_diag_enabled():
+                _auto_track_diag_log(
+                    "sam3_preload_prepared",
+                    functionId=self.id,
+                    frame=data.get("frame"),
+                    diagMeta=diag_meta,
+                    preloadBaseFrame=payload.get("preload_base_frame"),
+                    preloadFrameCount=payload.get("preload_frame_count"),
+                    preloadPayloadBytes=nuclio_payload_bytes,
+                )
 
         response = self.gateway.invoke(self, payload)
 

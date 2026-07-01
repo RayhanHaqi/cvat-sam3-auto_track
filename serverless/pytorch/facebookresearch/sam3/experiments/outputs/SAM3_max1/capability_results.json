@@ -1,0 +1,2158 @@
+{
+  "video": "/tmp/sam3_videos/SAM3.mp4",
+  "frame_count": 96,
+  "width": 704,
+  "height": 590,
+  "prompt_bbox": [
+    156.0,
+    162.0,
+    207.0,
+    205.0
+  ],
+  "config": {
+    "prompt_mode": "text_box",
+    "text_prompt": "white ping pong ball",
+    "output_policy": "mask_center_box",
+    "output_prob_thresh": 0.3,
+    "ir_refine_enabled": true,
+    "ir_stop_on_missing": false
+  },
+  "cuda_available": true,
+  "memory_start": {
+    "host_rss_mb": 1832.546875,
+    "cuda_allocated_mb": 3567.7626953125,
+    "cuda_reserved_mb": 3580.0
+  },
+  "mode_a": {
+    "elapsed_s": 24.992613709007856,
+    "returned_frame_indices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95
+    ],
+    "bboxes": {
+      "0": [
+        155.51573033707865,
+        162.13932584269662,
+        206.51573033707865,
+        205.13932584269662
+      ],
+      "1": [
+        155.77201783723524,
+        162.71794871794873,
+        206.77201783723524,
+        205.71794871794873
+      ],
+      "2": [
+        155.75207756232686,
+        162.83628808864265,
+        206.75207756232686,
+        205.83628808864265
+      ],
+      "3": [
+        155.69471018570624,
+        162.629994372538,
+        206.69471018570624,
+        205.629994372538
+      ],
+      "4": [
+        156.39314420803782,
+        165.58652482269503,
+        207.39314420803782,
+        208.58652482269503
+      ],
+      "5": [
+        156.61613194758246,
+        166.4245368278355,
+        207.61613194758246,
+        209.4245368278355
+      ],
+      "6": [
+        156.5625,
+        166.6056654676259,
+        207.5625,
+        209.6056654676259
+      ],
+      "7": [
+        156.50672947510094,
+        166.65926424405563,
+        207.50672947510094,
+        209.65926424405563
+      ],
+      "8": [
+        156.46817570596144,
+        166.6981174361273,
+        207.46817570596144,
+        209.6981174361273
+      ],
+      "9": [
+        156.4027027027027,
+        166.73513513513512,
+        207.4027027027027,
+        209.73513513513512
+      ],
+      "10": [
+        156.39447463768116,
+        166.6820652173913,
+        207.39447463768116,
+        209.6820652173913
+      ],
+      "11": [
+        156.3586762075134,
+        166.92262969588552,
+        207.3586762075134,
+        209.92262969588552
+      ],
+      "12": [
+        156.3282647584973,
+        166.9494633273703,
+        207.3282647584973,
+        209.9494633273703
+      ],
+      "13": [
+        156.2709172259508,
+        166.95906040268457,
+        207.2709172259508,
+        209.95906040268457
+      ],
+      "14": [
+        156.20921348314607,
+        166.92651685393258,
+        207.20921348314607,
+        209.92651685393258
+      ],
+      "15": [
+        156.18075539568346,
+        166.9091726618705,
+        207.18075539568346,
+        209.9091726618705
+      ],
+      "16": [
+        156.15827338129498,
+        166.91052158273382,
+        207.15827338129498,
+        209.91052158273382
+      ],
+      "17": [
+        156.17452200978212,
+        167.5182303245887,
+        207.17452200978212,
+        210.5182303245887
+      ],
+      "18": [
+        156.1755319148936,
+        167.5953014184397,
+        207.1755319148936,
+        210.5953014184397
+      ],
+      "19": [
+        156.19060283687944,
+        167.61347517730496,
+        207.19060283687944,
+        210.61347517730496
+      ],
+      "20": [
+        156.18664003550822,
+        167.59320905459387,
+        207.18664003550822,
+        210.59320905459387
+      ],
+      "21": [
+        157.0578475336323,
+        174.58699551569507,
+        208.0578475336323,
+        217.58699551569507
+      ],
+      "22": [
+        161.95917944467467,
+        195.23062577704104,
+        212.95917944467467,
+        238.23062577704104
+      ],
+      "23": [
+        165.21798080934502,
+        210.19837296620776,
+        216.21798080934502,
+        253.19837296620776
+      ],
+      "24": [
+        167.30057565789474,
+        227.46011513157896,
+        218.30057565789474,
+        270.46011513157896
+      ],
+      "25": [
+        170.37032520325204,
+        242.640243902439,
+        221.37032520325204,
+        285.640243902439
+      ],
+      "26": [
+        172.19009453349773,
+        261.08980682285244,
+        223.19009453349773,
+        304.08980682285244
+      ],
+      "27": [
+        176.68433029908974,
+        293.6592977893368,
+        227.68433029908974,
+        336.6592977893368
+      ],
+      "28": [
+        178.25713240673008,
+        312.2713972201902,
+        229.25713240673008,
+        355.2713972201902
+      ],
+      "29": [
+        179.65683345780434,
+        338.3162808065721,
+        230.65683345780434,
+        381.3162808065721
+      ],
+      "30": [
+        183.36426116838487,
+        373.42439862542955,
+        234.36426116838487,
+        416.42439862542955
+      ],
+      "31": [
+        183.67293729372938,
+        373.65049504950497,
+        234.67293729372938,
+        416.65049504950497
+      ],
+      "32": [
+        183.62458908612754,
+        373.56706114398423,
+        234.62458908612754,
+        416.56706114398423
+      ],
+      "33": [
+        183.59544112823878,
+        373.6069203017383,
+        234.59544112823878,
+        416.6069203017383
+      ],
+      "34": [
+        183.6014778325123,
+        373.5738916256158,
+        234.6014778325123,
+        416.5738916256158
+      ],
+      "35": [
+        183.5775496904529,
+        373.5371456500489,
+        234.5775496904529,
+        416.5371456500489
+      ],
+      "36": [
+        183.55332902391726,
+        373.60827407886234,
+        234.55332902391726,
+        416.60827407886234
+      ],
+      "37": [
+        183.62006420545745,
+        373.58731942215087,
+        234.62006420545745,
+        416.58731942215087
+      ],
+      "38": [
+        183.62192,
+        373.58768,
+        234.62192,
+        416.58768
+      ],
+      "39": [
+        183.60201471058522,
+        373.6275983370643,
+        234.60201471058522,
+        416.6275983370643
+      ],
+      "40": [
+        183.60640331315705,
+        373.5968461293406,
+        234.60640331315705,
+        416.5968461293406
+      ],
+      "41": [
+        183.58161321054303,
+        373.563194664973,
+        234.58161321054303,
+        416.563194664973
+      ],
+      "42": [
+        183.54860228716646,
+        373.5514612452351,
+        234.54860228716646,
+        416.5514612452351
+      ],
+      "43": [
+        183.56881313131314,
+        373.53125,
+        234.56881313131314,
+        416.53125
+      ],
+      "44": [
+        183.58115759672853,
+        373.5286253538849,
+        234.58115759672853,
+        416.5286253538849
+      ],
+      "45": [
+        183.61019371228963,
+        373.5704985709749,
+        234.61019371228963,
+        416.5704985709749
+      ],
+      "46": [
+        183.61377245508982,
+        373.4965332492909,
+        234.61377245508982,
+        416.4965332492909
+      ],
+      "47": [
+        183.57733417164414,
+        373.445614586608,
+        234.57733417164414,
+        416.445614586608
+      ],
+      "48": [
+        183.59849435382685,
+        373.4356963613551,
+        234.59849435382685,
+        416.4356963613551
+      ],
+      "49": [
+        183.59153605015675,
+        373.4260188087774,
+        234.59153605015675,
+        416.4260188087774
+      ],
+      "50": [
+        183.57140620106483,
+        373.4279674287504,
+        234.57140620106483,
+        416.4279674287504
+      ],
+      "51": [
+        183.54572502348887,
+        373.392264328218,
+        234.54572502348887,
+        416.392264328218
+      ],
+      "52": [
+        183.558125,
+        373.438125,
+        234.558125,
+        416.438125
+      ],
+      "53": [
+        183.58265751715533,
+        373.414847161572,
+        234.58265751715533,
+        416.414847161572
+      ],
+      "54": [
+        183.596291679651,
+        373.3899968837644,
+        234.596291679651,
+        416.3899968837644
+      ],
+      "55": [
+        183.60827629122588,
+        373.4159925326696,
+        234.60827629122588,
+        416.4159925326696
+      ],
+      "56": [
+        183.60208527855588,
+        373.44615624027387,
+        234.60208527855588,
+        416.44615624027387
+      ],
+      "57": [
+        183.5887297633873,
+        373.4607721046077,
+        234.5887297633873,
+        416.4607721046077
+      ],
+      "58": [
+        183.5936236391913,
+        373.4710730948678,
+        234.5936236391913,
+        416.4710730948678
+      ],
+      "59": [
+        183.60979782270607,
+        373.48258164852257,
+        234.60979782270607,
+        416.48258164852257
+      ],
+      "60": [
+        183.5952380952381,
+        373.4872393401805,
+        234.5952380952381,
+        416.4872393401805
+      ],
+      "61": [
+        183.6113184079602,
+        373.4925373134328,
+        234.6113184079602,
+        416.4925373134328
+      ],
+      "62": [
+        183.60609831985064,
+        373.5096453018046,
+        234.60609831985064,
+        416.5096453018046
+      ],
+      "63": [
+        183.59511967671745,
+        373.490985390115,
+        234.59511967671745,
+        416.490985390115
+      ],
+      "64": [
+        183.58077042559802,
+        373.4900590245418,
+        234.58077042559802,
+        416.4900590245418
+      ],
+      "65": [
+        183.58853681267473,
+        373.50745573159367,
+        234.58853681267473,
+        416.50745573159367
+      ],
+      "66": [
+        183.6055572803477,
+        373.51893821794476,
+        234.6055572803477,
+        416.51893821794476
+      ],
+      "67": [
+        183.58648481091134,
+        373.48853068815873,
+        234.58648481091134,
+        416.48853068815873
+      ],
+      "68": [
+        183.60207880856345,
+        373.46804219671117,
+        234.60207880856345,
+        416.46804219671117
+      ],
+      "69": [
+        183.60387596899224,
+        373.48387596899227,
+        234.60387596899224,
+        416.48387596899227
+      ],
+      "70": [
+        183.58488228004956,
+        373.52168525402726,
+        234.58488228004956,
+        416.52168525402726
+      ],
+      "71": [
+        183.58431494110354,
+        373.5148791072536,
+        234.58431494110354,
+        416.5148791072536
+      ],
+      "72": [
+        183.58266253869968,
+        373.51300309597525,
+        234.58266253869968,
+        416.51300309597525
+      ],
+      "73": [
+        183.6185758513932,
+        373.54891640866873,
+        234.6185758513932,
+        416.54891640866873
+      ],
+      "74": [
+        183.59789343246592,
+        373.518897149938,
+        234.59789343246592,
+        416.518897149938
+      ],
+      "75": [
+        183.59259832765562,
+        373.5538866522143,
+        234.59259832765562,
+        416.5538866522143
+      ],
+      "76": [
+        183.60358688930117,
+        373.54669140383425,
+        234.60358688930117,
+        416.54669140383425
+      ],
+      "77": [
+        183.57273290003096,
+        373.54394924172084,
+        234.57273290003096,
+        416.54394924172084
+      ],
+      "78": [
+        183.60006195786866,
+        373.5817843866171,
+        234.60006195786866,
+        416.5817843866171
+      ],
+      "79": [
+        183.59282178217822,
+        373.52413366336634,
+        234.59282178217822,
+        416.52413366336634
+      ],
+      "80": [
+        183.59504643962848,
+        373.5402476780186,
+        234.59504643962848,
+        416.5402476780186
+      ],
+      "81": [
+        183.59316001238008,
+        373.54085422469825,
+        234.59316001238008,
+        416.54085422469825
+      ],
+      "82": [
+        183.5940012368584,
+        373.5364873222016,
+        234.5940012368584,
+        416.5364873222016
+      ],
+      "83": [
+        183.59560643564356,
+        373.5417698019802,
+        234.59560643564356,
+        416.5417698019802
+      ],
+      "84": [
+        183.60612623762376,
+        373.5250618811881,
+        234.60612623762376,
+        416.5250618811881
+      ],
+      "85": [
+        183.58795292660267,
+        373.54800247754724,
+        234.58795292660267,
+        416.54800247754724
+      ],
+      "86": [
+        183.6092879256966,
+        373.5421052631579,
+        234.6092879256966,
+        416.5421052631579
+      ],
+      "87": [
+        183.58629755644913,
+        373.5414475719146,
+        234.58629755644913,
+        416.5414475719146
+      ],
+      "88": [
+        183.59560643564356,
+        373.5417698019802,
+        234.59560643564356,
+        416.5417698019802
+      ],
+      "89": [
+        183.61327762302693,
+        373.5204271123491,
+        234.61327762302693,
+        416.5204271123491
+      ],
+      "90": [
+        183.4383429672447,
+        372.88792549775206,
+        234.4383429672447,
+        415.88792549775206
+      ],
+      "91": [
+        183.4633407714377,
+        372.8838061842525,
+        234.4633407714377,
+        415.8838061842525
+      ],
+      "92": [
+        183.46558317399618,
+        372.8919694072658,
+        234.46558317399618,
+        415.8919694072658
+      ],
+      "93": [
+        183.4648786717752,
+        372.9010217113665,
+        234.4648786717752,
+        415.9010217113665
+      ],
+      "94": [
+        183.45496646438838,
+        372.91009262216545,
+        234.45496646438838,
+        415.91009262216545
+      ],
+      "95": [
+        183.46514230892228,
+        372.931403901503,
+        234.46514230892228,
+        415.931403901503
+      ]
+    },
+    "compare": {
+      "1": [
+        155.77201783723524,
+        162.71794871794873,
+        206.77201783723524,
+        205.71794871794873
+      ],
+      "10": [
+        156.39447463768116,
+        166.6820652173913,
+        207.39447463768116,
+        209.6820652173913
+      ],
+      "70": [
+        183.58488228004956,
+        373.52168525402726,
+        234.58488228004956,
+        416.52168525402726
+      ],
+      "95": [
+        183.46514230892228,
+        372.931403901503,
+        234.46514230892228,
+        415.931403901503
+      ]
+    }
+  },
+  "mode_b": {
+    "production_max": 1,
+    "records": [
+      {
+        "mode": "B",
+        "call_index": 0,
+        "requested_start_frame_index": 0,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          0,
+          1
+        ],
+        "selected_bbox": [
+          155.51573033707865,
+          162.13932584269662,
+          206.51573033707865,
+          205.13932584269662
+        ],
+        "elapsed_s": 0.2645924180105794
+      },
+      {
+        "mode": "B",
+        "call_index": 1,
+        "requested_start_frame_index": 1,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          1,
+          2
+        ],
+        "selected_bbox": [
+          155.77201783723524,
+          162.71794871794873,
+          206.77201783723524,
+          205.71794871794873
+        ],
+        "elapsed_s": 0.0024099459988065064
+      },
+      {
+        "mode": "B",
+        "call_index": 2,
+        "requested_start_frame_index": 2,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          2,
+          3
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0007047659892123193
+      },
+      {
+        "mode": "B",
+        "call_index": 3,
+        "requested_start_frame_index": 3,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          3,
+          4
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00025614400510676205
+      },
+      {
+        "mode": "B",
+        "call_index": 4,
+        "requested_start_frame_index": 4,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          4,
+          5
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00046949999523349106
+      },
+      {
+        "mode": "B",
+        "call_index": 5,
+        "requested_start_frame_index": 5,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          5,
+          6
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00036582801840268075
+      },
+      {
+        "mode": "B",
+        "call_index": 6,
+        "requested_start_frame_index": 6,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          6,
+          7
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00028948599356226623
+      },
+      {
+        "mode": "B",
+        "call_index": 7,
+        "requested_start_frame_index": 7,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          7,
+          8
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0003509900125209242
+      },
+      {
+        "mode": "B",
+        "call_index": 8,
+        "requested_start_frame_index": 8,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          8,
+          9
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0003817870165221393
+      },
+      {
+        "mode": "B",
+        "call_index": 9,
+        "requested_start_frame_index": 9,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          9,
+          10
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00028972700238227844
+      },
+      {
+        "mode": "B",
+        "call_index": 10,
+        "requested_start_frame_index": 10,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          10,
+          11
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002546820032875985
+      },
+      {
+        "mode": "B",
+        "call_index": 11,
+        "requested_start_frame_index": 11,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          11,
+          12
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002599220024421811
+      },
+      {
+        "mode": "B",
+        "call_index": 12,
+        "requested_start_frame_index": 12,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          12,
+          13
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002332929871045053
+      },
+      {
+        "mode": "B",
+        "call_index": 13,
+        "requested_start_frame_index": 13,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          13,
+          14
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002213300031144172
+      },
+      {
+        "mode": "B",
+        "call_index": 14,
+        "requested_start_frame_index": 14,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          14,
+          15
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00028178299544379115
+      },
+      {
+        "mode": "B",
+        "call_index": 15,
+        "requested_start_frame_index": 15,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          15,
+          16
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0003287500003352761
+      },
+      {
+        "mode": "B",
+        "call_index": 16,
+        "requested_start_frame_index": 16,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          16,
+          17
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002405760169494897
+      },
+      {
+        "mode": "B",
+        "call_index": 17,
+        "requested_start_frame_index": 17,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          17,
+          18
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00023316201986745
+      },
+      {
+        "mode": "B",
+        "call_index": 18,
+        "requested_start_frame_index": 18,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          18,
+          19
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00021933697280474007
+      },
+      {
+        "mode": "B",
+        "call_index": 19,
+        "requested_start_frame_index": 19,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          19,
+          20
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002231539983768016
+      },
+      {
+        "mode": "B",
+        "call_index": 20,
+        "requested_start_frame_index": 20,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          20,
+          21
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002218610025011003
+      },
+      {
+        "mode": "B",
+        "call_index": 21,
+        "requested_start_frame_index": 21,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          21,
+          22
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00021949701476842165
+      },
+      {
+        "mode": "B",
+        "call_index": 22,
+        "requested_start_frame_index": 22,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          22,
+          23
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00022029798128642142
+      },
+      {
+        "mode": "B",
+        "call_index": 23,
+        "requested_start_frame_index": 23,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          23,
+          24
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002116020186804235
+      },
+      {
+        "mode": "B",
+        "call_index": 24,
+        "requested_start_frame_index": 24,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          24,
+          25
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00026641300064511597
+      },
+      {
+        "mode": "B",
+        "call_index": 25,
+        "requested_start_frame_index": 25,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          25,
+          26
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002155889815185219
+      },
+      {
+        "mode": "B",
+        "call_index": 26,
+        "requested_start_frame_index": 26,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          26,
+          27
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0003086320066358894
+      },
+      {
+        "mode": "B",
+        "call_index": 27,
+        "requested_start_frame_index": 27,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          27,
+          28
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0006478699797298759
+      },
+      {
+        "mode": "B",
+        "call_index": 28,
+        "requested_start_frame_index": 28,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          28,
+          29
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002575379912741482
+      },
+      {
+        "mode": "B",
+        "call_index": 29,
+        "requested_start_frame_index": 29,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          29,
+          30
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00025281799025833607
+      },
+      {
+        "mode": "B",
+        "call_index": 30,
+        "requested_start_frame_index": 30,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          30,
+          31
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00021884599118493497
+      },
+      {
+        "mode": "B",
+        "call_index": 31,
+        "requested_start_frame_index": 31,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          31,
+          32
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0005607490020338446
+      },
+      {
+        "mode": "B",
+        "call_index": 32,
+        "requested_start_frame_index": 32,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          32,
+          33
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00035451698931865394
+      },
+      {
+        "mode": "B",
+        "call_index": 33,
+        "requested_start_frame_index": 33,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          33,
+          34
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0003125389921478927
+      },
+      {
+        "mode": "B",
+        "call_index": 34,
+        "requested_start_frame_index": 34,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          34,
+          35
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00031213799957185984
+      },
+      {
+        "mode": "B",
+        "call_index": 35,
+        "requested_start_frame_index": 35,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          35,
+          36
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00029170099878683686
+      },
+      {
+        "mode": "B",
+        "call_index": 36,
+        "requested_start_frame_index": 36,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          36,
+          37
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0004572870093397796
+      },
+      {
+        "mode": "B",
+        "call_index": 37,
+        "requested_start_frame_index": 37,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          37,
+          38
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00030668897670693696
+      },
+      {
+        "mode": "B",
+        "call_index": 38,
+        "requested_start_frame_index": 38,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          38,
+          39
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.000265071023022756
+      },
+      {
+        "mode": "B",
+        "call_index": 39,
+        "requested_start_frame_index": 39,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          39,
+          40
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0003209749993402511
+      },
+      {
+        "mode": "B",
+        "call_index": 40,
+        "requested_start_frame_index": 40,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          40,
+          41
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002824830007739365
+      },
+      {
+        "mode": "B",
+        "call_index": 41,
+        "requested_start_frame_index": 41,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          41,
+          42
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0006405279855243862
+      },
+      {
+        "mode": "B",
+        "call_index": 42,
+        "requested_start_frame_index": 42,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          42,
+          43
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00023096802760846913
+      },
+      {
+        "mode": "B",
+        "call_index": 43,
+        "requested_start_frame_index": 43,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          43,
+          44
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00030435400549322367
+      },
+      {
+        "mode": "B",
+        "call_index": 44,
+        "requested_start_frame_index": 44,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          44,
+          45
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0003452989913057536
+      },
+      {
+        "mode": "B",
+        "call_index": 45,
+        "requested_start_frame_index": 45,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          45,
+          46
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002400450175628066
+      },
+      {
+        "mode": "B",
+        "call_index": 46,
+        "requested_start_frame_index": 46,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          46,
+          47
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002259479952044785
+      },
+      {
+        "mode": "B",
+        "call_index": 47,
+        "requested_start_frame_index": 47,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          47,
+          48
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00025996199110522866
+      },
+      {
+        "mode": "B",
+        "call_index": 48,
+        "requested_start_frame_index": 48,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          48,
+          49
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00026287700165994465
+      },
+      {
+        "mode": "B",
+        "call_index": 49,
+        "requested_start_frame_index": 49,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          49,
+          50
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002620859886519611
+      },
+      {
+        "mode": "B",
+        "call_index": 50,
+        "requested_start_frame_index": 50,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          50,
+          51
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00022409498342312872
+      },
+      {
+        "mode": "B",
+        "call_index": 51,
+        "requested_start_frame_index": 51,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          51,
+          52
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002317100006621331
+      },
+      {
+        "mode": "B",
+        "call_index": 52,
+        "requested_start_frame_index": 52,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          52,
+          53
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002459659881424159
+      },
+      {
+        "mode": "B",
+        "call_index": 53,
+        "requested_start_frame_index": 53,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          53,
+          54
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002847180003300309
+      },
+      {
+        "mode": "B",
+        "call_index": 54,
+        "requested_start_frame_index": 54,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          54,
+          55
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00020809599664062262
+      },
+      {
+        "mode": "B",
+        "call_index": 55,
+        "requested_start_frame_index": 55,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          55,
+          56
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00019957998301833868
+      },
+      {
+        "mode": "B",
+        "call_index": 56,
+        "requested_start_frame_index": 56,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          56,
+          57
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002131549990735948
+      },
+      {
+        "mode": "B",
+        "call_index": 57,
+        "requested_start_frame_index": 57,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          57,
+          58
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00020638300338760018
+      },
+      {
+        "mode": "B",
+        "call_index": 58,
+        "requested_start_frame_index": 58,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          58,
+          59
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00019972998416051269
+      },
+      {
+        "mode": "B",
+        "call_index": 59,
+        "requested_start_frame_index": 59,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          59,
+          60
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002052200143225491
+      },
+      {
+        "mode": "B",
+        "call_index": 60,
+        "requested_start_frame_index": 60,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          60,
+          61
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00020187400514259934
+      },
+      {
+        "mode": "B",
+        "call_index": 61,
+        "requested_start_frame_index": 61,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          61,
+          62
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00020873700850643218
+      },
+      {
+        "mode": "B",
+        "call_index": 62,
+        "requested_start_frame_index": 62,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          62,
+          63
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002583390159998089
+      },
+      {
+        "mode": "B",
+        "call_index": 63,
+        "requested_start_frame_index": 63,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          63,
+          64
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002479500253684819
+      },
+      {
+        "mode": "B",
+        "call_index": 64,
+        "requested_start_frame_index": 64,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          64,
+          65
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002100899873767048
+      },
+      {
+        "mode": "B",
+        "call_index": 65,
+        "requested_start_frame_index": 65,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          65,
+          66
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0001919759961310774
+      },
+      {
+        "mode": "B",
+        "call_index": 66,
+        "requested_start_frame_index": 66,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          66,
+          67
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00017074699280783534
+      },
+      {
+        "mode": "B",
+        "call_index": 67,
+        "requested_start_frame_index": 67,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          67,
+          68
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00016596799832768738
+      },
+      {
+        "mode": "B",
+        "call_index": 68,
+        "requested_start_frame_index": 68,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          68,
+          69
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00016315298853442073
+      },
+      {
+        "mode": "B",
+        "call_index": 69,
+        "requested_start_frame_index": 69,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          69,
+          70
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00016348299686796963
+      },
+      {
+        "mode": "B",
+        "call_index": 70,
+        "requested_start_frame_index": 70,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          70,
+          71
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0005786429974250495
+      },
+      {
+        "mode": "B",
+        "call_index": 71,
+        "requested_start_frame_index": 71,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          71,
+          72
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00022993600578047335
+      },
+      {
+        "mode": "B",
+        "call_index": 72,
+        "requested_start_frame_index": 72,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          72,
+          73
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00023792099091224372
+      },
+      {
+        "mode": "B",
+        "call_index": 73,
+        "requested_start_frame_index": 73,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          73,
+          74
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002642399922478944
+      },
+      {
+        "mode": "B",
+        "call_index": 74,
+        "requested_start_frame_index": 74,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          74,
+          75
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00048551999498158693
+      },
+      {
+        "mode": "B",
+        "call_index": 75,
+        "requested_start_frame_index": 75,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          75,
+          76
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00037757898098789155
+      },
+      {
+        "mode": "B",
+        "call_index": 76,
+        "requested_start_frame_index": 76,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          76,
+          77
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00035384600050747395
+      },
+      {
+        "mode": "B",
+        "call_index": 77,
+        "requested_start_frame_index": 77,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          77,
+          78
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00024635702720843256
+      },
+      {
+        "mode": "B",
+        "call_index": 78,
+        "requested_start_frame_index": 78,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          78,
+          79
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00028162202215753496
+      },
+      {
+        "mode": "B",
+        "call_index": 79,
+        "requested_start_frame_index": 79,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          79,
+          80
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002887450100388378
+      },
+      {
+        "mode": "B",
+        "call_index": 80,
+        "requested_start_frame_index": 80,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          80,
+          81
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00026775599690154195
+      },
+      {
+        "mode": "B",
+        "call_index": 81,
+        "requested_start_frame_index": 81,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          81,
+          82
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002513459767214954
+      },
+      {
+        "mode": "B",
+        "call_index": 82,
+        "requested_start_frame_index": 82,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          82,
+          83
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0004884449881501496
+      },
+      {
+        "mode": "B",
+        "call_index": 83,
+        "requested_start_frame_index": 83,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          83,
+          84
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00026986998273059726
+      },
+      {
+        "mode": "B",
+        "call_index": 84,
+        "requested_start_frame_index": 84,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          84,
+          85
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00026872800663113594
+      },
+      {
+        "mode": "B",
+        "call_index": 85,
+        "requested_start_frame_index": 85,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          85,
+          86
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0004066239926032722
+      },
+      {
+        "mode": "B",
+        "call_index": 86,
+        "requested_start_frame_index": 86,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          86,
+          87
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002587190247140825
+      },
+      {
+        "mode": "B",
+        "call_index": 87,
+        "requested_start_frame_index": 87,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          87,
+          88
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002557639963924885
+      },
+      {
+        "mode": "B",
+        "call_index": 88,
+        "requested_start_frame_index": 88,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          88,
+          89
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002347049885429442
+      },
+      {
+        "mode": "B",
+        "call_index": 89,
+        "requested_start_frame_index": 89,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          89,
+          90
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00023413400049321353
+      },
+      {
+        "mode": "B",
+        "call_index": 90,
+        "requested_start_frame_index": 90,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          90,
+          91
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00021577998995780945
+      },
+      {
+        "mode": "B",
+        "call_index": 91,
+        "requested_start_frame_index": 91,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          91,
+          92
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00018487201305106282
+      },
+      {
+        "mode": "B",
+        "call_index": 92,
+        "requested_start_frame_index": 92,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          92,
+          93
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0002707310195546597
+      },
+      {
+        "mode": "B",
+        "call_index": 93,
+        "requested_start_frame_index": 93,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          93,
+          94
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00020601198775693774
+      },
+      {
+        "mode": "B",
+        "call_index": 94,
+        "requested_start_frame_index": 94,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          94,
+          95
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.00018608500249683857
+      },
+      {
+        "mode": "B",
+        "call_index": 95,
+        "requested_start_frame_index": 95,
+        "requested_max_frame_num_to_track": 1,
+        "returned_frame_indices": [
+          95
+        ],
+        "selected_bbox": null,
+        "elapsed_s": 0.0001619709946680814
+      }
+    ],
+    "compare": {
+      "1": [
+        155.77201783723524,
+        162.71794871794873,
+        206.77201783723524,
+        205.71794871794873
+      ],
+      "10": null,
+      "70": null,
+      "95": null
+    },
+    "memory_points": {
+      "start": {
+        "host_rss_mb": 3147.4765625,
+        "cuda_allocated_mb": 3961.82470703125,
+        "cuda_reserved_mb": 5254.0
+      },
+      "frame_0": {
+        "host_rss_mb": 3228.87109375,
+        "cuda_allocated_mb": 4003.87109375,
+        "cuda_reserved_mb": 5254.0
+      },
+      "frame_50": {
+        "host_rss_mb": 3252.12890625,
+        "cuda_allocated_mb": 4015.4970703125,
+        "cuda_reserved_mb": 5254.0
+      },
+      "frame_95": {
+        "host_rss_mb": 3252.12890625,
+        "cuda_allocated_mb": 4021.31103515625,
+        "cuda_reserved_mb": 5254.0
+      }
+    },
+    "latency_summary": {
+      "count": 96,
+      "min_s": 0.0001619709946680814,
+      "max_s": 0.2645924180105794,
+      "mean_s": 0.0030582362702868218,
+      "frame_1_s": 0.0024099459988065064,
+      "frame_10_s": 0.0002546820032875985,
+      "frame_70_s": 0.0005786429974250495,
+      "frame_95_s": 0.0001619709946680814
+    }
+  },
+  "mode_c": {
+    "1": {
+      "elapsed_s": 0.5365842689934652,
+      "returned_frame_indices": [
+        1,
+        2
+      ],
+      "selected_bbox": [
+        155.86926478717524,
+        162.75870646766168,
+        206.86926478717524,
+        205.75870646766168
+      ],
+      "all_bboxes": {
+        "1": [
+          155.86926478717524,
+          162.75870646766168,
+          206.86926478717524,
+          205.75870646766168
+        ],
+        "2": [
+          155.86624379481523,
+          162.80557087699944,
+          206.86624379481523,
+          205.80557087699944
+        ]
+      }
+    },
+    "10": {
+      "elapsed_s": 0.8560281100217253,
+      "returned_frame_indices": [
+        10,
+        11
+      ],
+      "selected_bbox": [
+        156.75922592259226,
+        165.74662466246625,
+        207.75922592259226,
+        208.74662466246625
+      ],
+      "all_bboxes": {
+        "10": [
+          156.75922592259226,
+          165.74662466246625,
+          207.75922592259226,
+          208.74662466246625
+        ],
+        "11": [
+          156.93887423043097,
+          166.51759014951628,
+          207.93887423043097,
+          209.51759014951628
+        ]
+      }
+    },
+    "70": {
+      "elapsed_s": 0.828518014983274,
+      "returned_frame_indices": [
+        70,
+        71
+      ],
+      "selected_bbox": [
+        183.49339360222532,
+        372.1230876216968,
+        234.49339360222532,
+        415.1230876216968
+      ],
+      "all_bboxes": {
+        "70": [
+          183.49339360222532,
+          372.1230876216968,
+          234.49339360222532,
+          415.1230876216968
+        ],
+        "71": [
+          183.79642133693451,
+          373.0361242403781,
+          234.79642133693451,
+          416.0361242403781
+        ]
+      }
+    },
+    "95": {
+      "elapsed_s": 0.2930740309820976,
+      "returned_frame_indices": [
+        95
+      ],
+      "selected_bbox": [
+        182.84089246525238,
+        370.80907095830287,
+        233.84089246525238,
+        413.80907095830287
+      ],
+      "all_bboxes": {
+        "95": [
+          182.84089246525238,
+          370.80907095830287,
+          233.84089246525238,
+          413.80907095830287
+        ]
+      }
+    }
+  },
+  "max_frame_probe_frame_10": {
+    "0": {
+      "elapsed_s": 0.5312797969963867,
+      "returned_frame_indices": [
+        10
+      ],
+      "selected_bbox": [
+        156.75922592259226,
+        165.74662466246625,
+        207.75922592259226,
+        208.74662466246625
+      ]
+    },
+    "1": {
+      "elapsed_s": 0.912329047016101,
+      "returned_frame_indices": [
+        10,
+        11
+      ],
+      "selected_bbox": [
+        156.75922592259226,
+        165.74662466246625,
+        207.75922592259226,
+        208.74662466246625
+      ]
+    }
+  },
+  "compare_report": {
+    "1": {
+      "mode_a_bbox": [
+        155.77201783723524,
+        162.71794871794873,
+        206.77201783723524,
+        205.71794871794873
+      ],
+      "mode_b_bbox": [
+        155.77201783723524,
+        162.71794871794873,
+        206.77201783723524,
+        205.71794871794873
+      ],
+      "mode_c_bbox": [
+        155.86926478717524,
+        162.75870646766168,
+        206.86926478717524,
+        205.75870646766168
+      ],
+      "iou_a_vs_b": 1.0,
+      "iou_a_vs_c": 0.9943105307785484,
+      "lost_b": false,
+      "lost_c": false
+    },
+    "10": {
+      "mode_a_bbox": [
+        156.39447463768116,
+        166.6820652173913,
+        207.39447463768116,
+        209.6820652173913
+      ],
+      "mode_b_bbox": null,
+      "mode_c_bbox": [
+        156.75922592259226,
+        165.74662466246625,
+        207.75922592259226,
+        208.74662466246625
+      ],
+      "iou_a_vs_b": null,
+      "iou_a_vs_c": 0.9441053571803694,
+      "lost_b": true,
+      "lost_c": false
+    },
+    "70": {
+      "mode_a_bbox": [
+        183.58488228004956,
+        373.52168525402726,
+        234.58488228004956,
+        416.52168525402726
+      ],
+      "mode_b_bbox": null,
+      "mode_c_bbox": [
+        183.49339360222532,
+        372.1230876216968,
+        234.49339360222532,
+        415.1230876216968
+      ],
+      "iou_a_vs_b": null,
+      "iou_a_vs_c": 0.9337477249815297,
+      "lost_b": true,
+      "lost_c": false
+    },
+    "95": {
+      "mode_a_bbox": [
+        183.46514230892228,
+        372.931403901503,
+        234.46514230892228,
+        415.931403901503
+      ],
+      "mode_b_bbox": null,
+      "mode_c_bbox": [
+        182.84089246525238,
+        370.80907095830287,
+        233.84089246525238,
+        413.80907095830287
+      ],
+      "iou_a_vs_b": null,
+      "iou_a_vs_c": 0.8850272155002724,
+      "lost_b": true,
+      "lost_c": false
+    }
+  },
+  "memory_end": {
+    "host_rss_mb": 4975.70703125,
+    "cuda_allocated_mb": 4413.7177734375,
+    "cuda_reserved_mb": 6134.0
+  }
+}

@@ -826,6 +826,26 @@ class LambdaTestCases(_LambdaTestCaseBase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("states", response.data)
 
+    def test_sam3_nuclio_payload_bytes_guard_uses_full_body(self):
+        from cvat.apps.lambda_manager.views import measure_sam3_nuclio_payload_bytes
+
+        preload_fields = {
+            "preload_images": ["Zm9v"],
+            "preload_base_frame": 0,
+            "preload_frame_count": 1,
+        }
+        preload_only = len(json.dumps(preload_fields).encode("utf-8"))
+        full_payload = {
+            "image": "YmFy",
+            "shapes": [[1.0, 2.0, 3.0, 4.0]],
+            "states": [],
+            "frame_index": 0,
+            "_autoTrackDiag": {"requestId": "req-1", "sessionId": "sess-1"},
+            **preload_fields,
+        }
+        full_bytes = measure_sam3_nuclio_payload_bytes(full_payload)
+        self.assertGreater(full_bytes, preload_only)
+
     def test_api_v2_lambda_functions_create_tracker_bad_signature(self):
         signer = TimestampSigner(key="bad key")
 
