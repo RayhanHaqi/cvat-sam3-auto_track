@@ -1142,7 +1142,7 @@ class ModelHandler:
         previous_accepted_target_side=None,
     ):
         if prev_lost:
-            return None, True, None
+            return None, True, None, None
 
         reference_bbox = prompt_bbox if is_init_frame else last_known_bbox
         if self.config.output_policy == "adaptive_component_square_box":
@@ -1161,7 +1161,7 @@ class ModelHandler:
             if is_init_frame:
                 bbox = prompt_bbox
             else:
-                return None, True, None
+                return None, True, None, None
 
         bbox = self._maybe_refine_bbox(
             frame_image,
@@ -1172,7 +1172,7 @@ class ModelHandler:
             if is_init_frame:
                 bbox = prompt_bbox
             else:
-                return None, True, None
+                return None, True, None, None
 
         if (
             not is_init_frame
@@ -1181,13 +1181,15 @@ class ModelHandler:
             and _bboxes_near(bbox, prompt_bbox)
             and not _bboxes_near(last_known_bbox, prompt_bbox)
         ):
-            return None, True, None
+            return None, True, None, None
 
+        canonical_tracking_bbox = list(bbox)
+        emitted_bbox = canonical_tracking_bbox
         adaptive_diag = None
         if self.config.output_policy == "adaptive_component_square_box":
-            bbox, adaptive_diag = apply_adaptive_component_square_box(
+            emitted_bbox, adaptive_diag = apply_adaptive_component_square_box(
                 frame_image,
-                bbox,
+                canonical_tracking_bbox,
                 prompt_bbox,
                 None if is_init_frame else last_known_bbox,
                 is_init_frame,
@@ -1195,13 +1197,21 @@ class ModelHandler:
                 previous_accepted_target_side=previous_accepted_target_side,
             )
             if adaptive_diag is not None:
+                can_cx, can_cy = bbox_center(canonical_tracking_bbox)
+                emit_cx, emit_cy = bbox_center(emitted_bbox)
+                adaptive_diag["canonical_tracking_bbox"] = canonical_tracking_bbox
+                adaptive_diag["canonical_center_x"] = can_cx
+                adaptive_diag["canonical_center_y"] = can_cy
+                adaptive_diag["emitted_bbox"] = emitted_bbox
+                adaptive_diag["emitted_center_x"] = emit_cx
+                adaptive_diag["emitted_center_y"] = emit_cy
                 log_adaptive_scale_diagnostics(
                     adaptive_diag,
                     relative_frame=relative_frame,
                     diag_meta=diag_meta,
                 )
 
-        return bbox, False, adaptive_diag
+        return emitted_bbox, False, adaptive_diag, canonical_tracking_bbox
 
     def _build_frame_cache(
         self,
@@ -1228,25 +1238,27 @@ class ModelHandler:
                 outputs = outputs_by_frame.get(relative_frame)
                 is_init_frame = relative_frame == 0
                 last_known_bbox = prev_bbox if prev_bbox is not None else prompt_bbox
-                bbox, lost, adaptive_diag = self._postprocess_frame_outputs(
-                    sess,
-                    frame_image,
-                    outputs,
-                    is_init_frame=is_init_frame,
-                    prompt_bbox=prompt_bbox,
-                    last_known_bbox=last_known_bbox,
-                    prev_lost=prev_lost,
-                    relative_frame=relative_frame,
-                    previous_accepted_target_side=prev_accepted_target_side,
+                emitted_bbox, lost, adaptive_diag, canonical_tracking_bbox = (
+                    self._postprocess_frame_outputs(
+                        sess,
+                        frame_image,
+                        outputs,
+                        is_init_frame=is_init_frame,
+                        prompt_bbox=prompt_bbox,
+                        last_known_bbox=last_known_bbox,
+                        prev_lost=prev_lost,
+                        relative_frame=relative_frame,
+                        previous_accepted_target_side=prev_accepted_target_side,
+                    )
                 )
-                cache[relative_frame] = {"bbox": bbox, "lost": lost}
+                cache[relative_frame] = {"bbox": emitted_bbox, "lost": lost}
                 if lost:
                     prev_lost = True
                     prev_bbox = None
                     prev_accepted_target_side = None
                 else:
                     prev_lost = False
-                    prev_bbox = bbox
+                    prev_bbox = canonical_tracking_bbox
                     if (
                         self.config.output_policy == "adaptive_component_square_box"
                         and adaptive_diag is not None

@@ -407,7 +407,7 @@ def test_postprocess_loss_semantics_unchanged_for_adaptive():
     mask[18:22, 18:22] = 1
     handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
 
-    bbox, lost, _diag = handler._postprocess_frame_outputs(
+    bbox, lost, _diag, _canonical = handler._postprocess_frame_outputs(
         sess,
         frame_image,
         {"out_binary_masks": [mask]},
