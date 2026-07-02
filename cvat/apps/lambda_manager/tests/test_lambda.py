@@ -954,9 +954,17 @@ class LambdaTestCases(_LambdaTestCaseBase):
             "cvat.apps.lambda_manager.views.LambdaFunction._get_image",
             return_value=frame_b64,
         ):
+            timeline_diag = {
+                "sourceTimelineVerified": True,
+                "preloadStartRawIndex": 1,
+                "preloadEndRawIndex": 2,
+                "firstSourceGapAtCvatFrame": None,
+                "firstSourceGapDelta": None,
+                "preloadStopReason": "job_end",
+            }
             with mock.patch(
-                "cvat.apps.lambda_manager.views.LambdaFunction._sam3_preload_frame_indices",
-                return_value=[1, 2],
+                "cvat.apps.lambda_manager.views.LambdaFunction._resolve_sam3_preload_frames",
+                return_value=([1, 2], timeline_diag),
             ):
                 with mock.patch(
                     "cvat.apps.lambda_manager.views.LambdaGateway.invoke",

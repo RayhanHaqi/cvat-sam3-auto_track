@@ -178,6 +178,117 @@ class Sam3SourceTimelineGuardIntegrationTests(_LambdaTestCaseBase):
         self.assertEqual(captured_frames, list(range(100, 112)))
         self.assertNotIn(112, captured_frames)
 
+    def test_sam3_init_resolves_timeline_before_any_get_image(self):
+        from cvat.apps.engine.models import Job, Task
+
+        job = Job.objects.get(segment__task_id=self.main_task["id"])
+        db_task = Task.objects.get(pk=self.main_task["id"])
+        func = self._sam3_function()
+        paths = {
+            0: "frame_10.png",
+            1: "frame_11.png",
+            2: "frame_20.png",
+            3: "frame_21.png",
+        }
+        call_log: list[str | tuple[str, int]] = []
+        frame_b64 = base64.b64encode(b"jpeg").decode("ascii")
+        original_resolve = LambdaFunction._resolve_sam3_preload_frames
+
+        def tracked_resolve(self, db_task_arg, db_job, base_frame):
+            call_log.append("resolve")
+            return original_resolve(self, db_task_arg, db_job, base_frame)
+
+        def capture_get_image(_db_task, frame_idx):
+            call_log.append(("get_image", frame_idx))
+            return frame_b64
+
+        captured: list[dict] = []
+
+        def capture_gateway_invoke(_func_arg, payload):
+            captured.append(dict(payload))
+            return {
+                "shapes": [[12.34, 34.0, 35.01, 41.99]],
+                "states": [{"session_key": "sam3-order-test"}],
+            }
+
+        with mock.patch.object(
+            func,
+            "_sam3_preload_candidate_frame_indices",
+            return_value=[0, 1, 2],
+        ):
+            with mock.patch.object(
+                func,
+                "_sam3_source_frame_path",
+                side_effect=lambda _task, frame_idx: paths.get(frame_idx),
+            ):
+                with mock.patch.object(
+                    LambdaFunction,
+                    "_resolve_sam3_preload_frames",
+                    autospec=True,
+                    side_effect=tracked_resolve,
+                ):
+                    with mock.patch.object(func, "_get_image", side_effect=capture_get_image):
+                        with mock.patch.object(
+                            func.gateway,
+                            "invoke",
+                            side_effect=capture_gateway_invoke,
+                        ):
+                            func.invoke(
+                                db_task,
+                                {
+                                    "frame": 0,
+                                    "shapes": [{
+                                        "type": "rectangle",
+                                        "points": [12.12, 34.45, 54.0, 76.12],
+                                    }],
+                                },
+                                db_job=job,
+                            )
+
+        self.assertEqual(call_log[0], "resolve")
+        resolve_index = call_log.index("resolve")
+        fetched_frames = [entry[1] for entry in call_log if isinstance(entry, tuple)]
+        self.assertEqual(fetched_frames, [0, 1])
+        self.assertTrue(
+            all(call_log.index(("get_image", frame_idx)) > resolve_index for frame_idx in fetched_frames)
+        )
+        self.assertNotIn(2, fetched_frames)
+        self.assertEqual(captured[0]["preload_frame_count"], 2)
+        self.assertEqual(captured[0]["image"], captured[0]["preload_images"][0])
+
+    def test_task9_style_init_fetches_exactly_twelve_frames_including_seed(self):
+        from cvat.apps.engine.models import Job, Task
+
+        db_task = Task.objects.get(pk=self.main_task["id"])
+        db_job = Job.objects.get(segment__task_id=db_task.id)
+        func = self._sam3_function()
+        paths = _task9_style_paths()
+        captured_frames: list[int] = []
+        frame_b64 = base64.b64encode(b"jpeg").decode("ascii")
+
+        with mock.patch.object(
+            func,
+            "_sam3_preload_candidate_frame_indices",
+            return_value=list(range(100, 196)),
+        ):
+            with mock.patch.object(
+                func,
+                "_sam3_source_frame_path",
+                side_effect=lambda _task, frame_idx: paths.get(frame_idx),
+            ):
+                with mock.patch.object(
+                    func,
+                    "_get_image",
+                    side_effect=lambda _task, frame_idx: (
+                        captured_frames.append(frame_idx) or frame_b64
+                    ),
+                ):
+                    fields = func._build_sam3_preload_fields(db_task, db_job, 100)
+
+        self.assertEqual(fields["preload_frame_count"], 12)
+        self.assertEqual(captured_frames, list(range(100, 112)))
+        self.assertEqual(len(captured_frames), 12)
+
     def test_cache_continuation_through_final_pre_gap_frame(self):
         mod = _load_sam3_handler_module()
 

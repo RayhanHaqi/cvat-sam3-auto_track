@@ -673,32 +673,61 @@ class LambdaFunction:
                                 "SAM3 bounded preload requires a job context",
                                 code=status.HTTP_400_BAD_REQUEST,
                             )
-                        self._assert_sam3_contiguous_range_job(db_job)
-
-                    payload.update(
-                        {
-                            "image": self._get_image(db_task, frame_index),
-                            "shapes": list(map(prepare_shape, shapes)),
-                            "states": [
-                                (
-                                    None
-                                    if state is None
-                                    else json.loads(
-                                        signer.unsign(state, max_age=self.TRACKER_STATE_MAX_AGE)
-                                    )
-                                )
-                                for state in states
-                            ],
-                        }
-                    )
-                    if is_sam3_tracker and is_init:
-                        payload["frame_index"] = frame_index
-                        payload.update(
-                            self._build_sam3_preload_fields(
-                                db_task,
-                                db_job,
-                                frame_index,
+                        frame_indices, timeline_diag = self._resolve_sam3_preload_frames(
+                            db_task,
+                            db_job,
+                            frame_index,
+                        )
+                        if not frame_indices:
+                            raise ValidationError(
+                                "SAM3 preload produced zero frames",
+                                code=status.HTTP_400_BAD_REQUEST,
                             )
+                        self._log_sam3_preload_timeline(frame_index, timeline_diag)
+                        preload_images, image_cache = self._fetch_sam3_frame_images(
+                            db_task,
+                            frame_indices,
+                        )
+                        payload.update(
+                            {
+                                "image": image_cache[frame_index],
+                                "shapes": list(map(prepare_shape, shapes)),
+                                "states": [
+                                    (
+                                        None
+                                        if state is None
+                                        else json.loads(
+                                            signer.unsign(
+                                                state, max_age=self.TRACKER_STATE_MAX_AGE
+                                            )
+                                        )
+                                    )
+                                    for state in states
+                                ],
+                                "frame_index": frame_index,
+                                "preload_images": preload_images,
+                                "preload_base_frame": frame_index,
+                                "preload_frame_count": len(preload_images),
+                            }
+                        )
+                    else:
+                        payload.update(
+                            {
+                                "image": self._get_image(db_task, frame_index),
+                                "shapes": list(map(prepare_shape, shapes)),
+                                "states": [
+                                    (
+                                        None
+                                        if state is None
+                                        else json.loads(
+                                            signer.unsign(
+                                                state, max_age=self.TRACKER_STATE_MAX_AGE
+                                            )
+                                        )
+                                    )
+                                    for state in states
+                                ],
+                            }
                         )
             except BadSignature as ex:
                 raise ValidationError("Invalid or expired tracker state") from ex
@@ -915,6 +944,31 @@ class LambdaFunction:
             lambda frame_idx: self._sam3_source_frame_path(db_task, frame_idx),
         )
 
+    def _log_sam3_preload_timeline(self, base_frame: int, timeline_diag: dict[str, Any]) -> None:
+        slogger.glob.info(
+            "SAM3 preload source timeline: %s",
+            json.dumps(timeline_diag, default=str),
+        )
+        if _auto_track_diag_enabled():
+            _auto_track_diag_log(
+                "sam3_preload_source_timeline",
+                preloadBaseFrame=base_frame,
+                **timeline_diag,
+            )
+
+    def _fetch_sam3_frame_images(
+        self,
+        db_task: Task,
+        frame_indices: list[int],
+    ) -> tuple[list[str], dict[int, str]]:
+        image_cache: dict[int, str] = {}
+        preload_images: list[str] = []
+        for frame_idx in frame_indices:
+            if frame_idx not in image_cache:
+                image_cache[frame_idx] = self._get_image(db_task, frame_idx)
+            preload_images.append(image_cache[frame_idx])
+        return preload_images, image_cache
+
     def _build_sam3_preload_fields(
         self,
         db_task: Task,
@@ -931,17 +985,8 @@ class LambdaFunction:
                 "SAM3 preload produced zero frames",
                 code=status.HTTP_400_BAD_REQUEST,
             )
-        slogger.glob.info(
-            "SAM3 preload source timeline: %s",
-            json.dumps(timeline_diag, default=str),
-        )
-        if _auto_track_diag_enabled():
-            _auto_track_diag_log(
-                "sam3_preload_source_timeline",
-                preloadBaseFrame=base_frame,
-                **timeline_diag,
-            )
-        preload_images = [self._get_image(db_task, frame_idx) for frame_idx in frame_indices]
+        self._log_sam3_preload_timeline(base_frame, timeline_diag)
+        preload_images, _image_cache = self._fetch_sam3_frame_images(db_task, frame_indices)
         return {
             "preload_images": preload_images,
             "preload_base_frame": base_frame,
