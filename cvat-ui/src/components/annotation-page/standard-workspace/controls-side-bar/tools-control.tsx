@@ -32,8 +32,12 @@ import {
 } from 'cvat-core-wrapper';
 import openCVWrapper from 'utils/opencv-wrapper/opencv-wrapper';
 import {
-    findAutoTrackBoundaryCommitClientID,
+    shouldCommitShapeForInactiveTrackingBranch,
 } from 'utils/auto-track-boundary-commit';
+import {
+    handlePreloadRangeExhaustedBoundaryCommit,
+    PreloadRangeExhaustedBoundaryResult,
+} from 'utils/auto-track-boundary-handler';
 import {
     isSam3PreloadRangeExhaustedError,
     SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE,
@@ -59,6 +63,11 @@ import ApproximationAccuracy, {
 } from 'components/annotation-page/standard-workspace/controls-side-bar/approximation-accuracy';
 import ConfidenceThreshold from 'components/annotation-page/standard-workspace/controls-side-bar/confidence-threshold';
 import { switchToolsBlockerState } from 'actions/settings-actions';
+import { autoTrackDiagnostics, boxGeometryFromPoints } from 'utils/auto-track-diagnostics';
+import {
+    createAutoTrackRequestId,
+    setAutoTrackDiagBridge,
+} from 'cvat-core/src/auto-track-diagnostics-bridge';
 import withVisibilityHandling from './handle-popover-visibility';
 import ToolsTooltips from './interactor-tooltips';
 import {
@@ -69,11 +78,6 @@ import {
     shouldConfirmAutoTrackLoss,
     validateAutoTrackCandidate,
 } from './auto_track_ball_validation';
-import { autoTrackDiagnostics, boxGeometryFromPoints } from 'utils/auto-track-diagnostics';
-import {
-    createAutoTrackRequestId,
-    setAutoTrackDiagBridge,
-} from 'cvat-core/src/auto-track-diagnostics-bridge';
 
 interface StateToProps {
     canvasInstance: Canvas;
@@ -100,7 +104,12 @@ interface DispatchToProps {
     onInteractionStart: typeof interactWithCanvas;
     onSwitchToolsBlockerState: typeof switchToolsBlockerState;
     switchNavigationBlocked: typeof switchNavigationBlockedAction;
-    changeFrame: typeof changeFrameAsync;
+    changeFrame: (
+        toFrame: number,
+        fillBuffer?: boolean,
+        frameStep?: number,
+        forceUpdate?: boolean,
+    ) => Promise<void>;
 }
 
 const MIN_SUPPORTED_INTERACTOR_VERSION = 2;
@@ -418,68 +427,126 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         setAutoTrackDiagBridge(null);
     }
 
-    private collectAutoTrackTelemetry(
-        objectStates: ObjectState[],
-        trackedShapes: TrackedShape[],
-    ): {
-        activeTrackedObjectCount: number;
-        committedShapeCountForCurrentTrack: number;
-        currentTrackKeyframeCount: null;
-        currentTrackFrameSpan: number | null;
-        totalAnnotationStateCount: number;
-        totalVisibleCanvasShapeCount: null;
-    } {
-        const activeTrackedObjectCount = trackedShapes.length;
-        const primaryTracked = trackedShapes[0];
-        const clientState = primaryTracked ?
-            objectStates.find((state) => state.clientID === primaryTracked.clientID) :
-            undefined;
-        const keyframes = clientState?.keyframes ?? null;
-        let currentTrackFrameSpan: number | null = null;
-        if (
-            keyframes &&
-            typeof keyframes.first === 'number' &&
-            typeof keyframes.last === 'number'
-        ) {
-            currentTrackFrameSpan = keyframes.last - keyframes.first + 1;
-        }
-        return {
-            activeTrackedObjectCount,
-            committedShapeCountForCurrentTrack: this.autoTrackCommittedSaveCount,
-            currentTrackKeyframeCount: null,
-            currentTrackFrameSpan,
-            totalAnnotationStateCount: objectStates.length,
-            totalVisibleCanvasShapeCount: null,
-        };
-    }
-
-    private noteAutoTrackCommittedSave(): void {
-        this.autoTrackCommittedSaveCount += 1;
-        if (autoTrackDiagnostics.isEnabled()) {
-            autoTrackDiagnostics.patchCurrentFrame({
-                committedShapeCountForCurrentTrack: this.autoTrackCommittedSaveCount,
-            });
-        }
-    }
-
-    private buildAutoTrackDiagPayload(
-        sessionId: number,
+    private async handleAutoTrackLambdaError(
+        error: any,
         frame: number,
-        requestType: string,
-        requestId: string,
-    ): Record<string, unknown> {
-        if (!autoTrackDiagnostics.isEnabled() || !this.autoTrackSessionActive) {
-            return {};
+        sessionId: number,
+        trackerGroupClientIDs: number[],
+        objectStates: ObjectState[],
+        lostClientIDs: number[],
+    ): Promise<'not_handled' | 'boundary_stop' | 'boundary_stale'> {
+        if (!isSam3PreloadRangeExhaustedError(error)) {
+            return 'not_handled';
         }
-        return {
-            _autoTrackDiag: {
-                sessionId,
-                jobFrameIndex: frame,
-                requestType,
-                requestId,
-            },
+
+        const warnOnlyStop = (): void => {
+            if (this.isAutoTrackSessionCurrent(sessionId) && autoTrackDiagnostics.isEnabled()) {
+                autoTrackDiagnostics.endSession('session_stop', 'preload_range_exhausted');
+            }
+            this.invalidateAutoTrackSession();
+            this.stopAutoTrackSession();
+            notification.warning({
+                message: 'Auto Track stopped',
+                description: <CVATMarkdown>{SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE}</CVATMarkdown>,
+                duration: 8,
+            });
+            if (autoTrackDiagnostics.isEnabled()) {
+                autoTrackDiagnostics.patchCurrentFrame({ stopReason: 'preload_range_exhausted' });
+            }
         };
+
+        const result: PreloadRangeExhaustedBoundaryResult = await handlePreloadRangeExhaustedBoundaryCommit({
+            boundaryFrame: frame,
+            sessionId,
+            trackerGroupClientIDs,
+            objectStates,
+            getCurrentSessionId: () => this.autoTrackSessionId,
+            isAutoTrackSessionActive: () => this.autoTrackSessionActive,
+            resolveObjectState: (clientID) => {
+                const objectState = objectStates.find((state) => state.clientID === clientID);
+                if (!objectState) {
+                    return null;
+                }
+                return {
+                    get outside(): boolean {
+                        return objectState.outside;
+                    },
+                    set outside(value: boolean) {
+                        objectState.outside = value;
+                    },
+                    get keyframe(): boolean {
+                        return objectState.keyframe;
+                    },
+                    set keyframe(value: boolean) {
+                        objectState.keyframe = value;
+                    },
+                    save: async (): Promise<void> => {
+                        if (!this.isAutoTrackSessionCurrent(sessionId) || !this.autoTrackSessionActive) {
+                            return;
+                        }
+                        autoTrackDiagnostics.emit('shape_commit_start', {
+                            clientID,
+                            reason: 'preload_range_exhausted',
+                        });
+                        const saveStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                        await objectState.save();
+                        this.noteAutoTrackCommittedSave();
+                        autoTrackDiagnostics.patchCurrentFrame({
+                            shapeSaveMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - saveStart,
+                        });
+                        autoTrackDiagnostics.emit('shape_commit_end', {
+                            clientID,
+                            reason: 'preload_range_exhausted',
+                        });
+                    },
+                };
+            },
+            warnOnlyStop,
+            onOutsideCommitted: async (clientID: number): Promise<void> => {
+                if (!this.isAutoTrackSessionCurrent(sessionId) || !this.autoTrackSessionActive) {
+                    return;
+                }
+                lostClientIDs.push(clientID);
+                notification.warning({
+                    message: 'Auto Track stopped',
+                    description: <CVATMarkdown>{SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE}</CVATMarkdown>,
+                    duration: 8,
+                });
+                autoTrackDiagnostics.endSession('session_stop', 'preload_range_exhausted');
+                this.invalidateAutoTrackSession();
+                this.stopAutoTrackSession();
+                if (autoTrackDiagnostics.isEnabled()) {
+                    autoTrackDiagnostics.patchCurrentFrame({ stopReason: 'preload_range_exhausted' });
+                }
+            },
+        });
+
+        if (result === 'stale') {
+            return 'boundary_stale';
+        }
+        return 'boundary_stop';
     }
+
+    private getSupportedTrackers(): MLModel[] {
+        const { trackers } = this.props;
+        return trackers.filter((tracker: MLModel) => (
+            tracker.supportedShapeTypes!.includes(ShapeType.RECTANGLE) &&
+            !/sam\s*2/i.test(tracker.name) &&
+            !String(tracker.id).toLowerCase().includes('sam2')
+        ));
+    }
+
+    private autoTrackEscapeListener = (event: KeyboardEvent): void => {
+        if (!this.autoTrackSessionActive) {
+            return;
+        }
+        if (event.key !== 'Escape' && event.key !== 'Esc' && event.keyCode !== 27) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        this.cancelAutoTrackSession();
+    };
 
     private stopAutoTrackSession = (): void => {
         this.autoTrackSessionActive = false;
@@ -504,221 +571,9 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         }
         this.invalidateAutoTrackSession();
         this.stopAutoTrackSession();
-        this.props.canvasInstance.cancel();
+        const { canvasInstance } = this.props;
+        canvasInstance.cancel();
     };
-
-    private async handleAutoTrackLambdaError(
-        error: any,
-        frame: number,
-        objectStates: ObjectState[],
-        trackedShapes: TrackedShape[],
-        lostClientIDs: number[],
-    ): Promise<boolean> {
-        if (!isSam3PreloadRangeExhaustedError(error)) {
-            return false;
-        }
-
-        const commitClientID = findAutoTrackBoundaryCommitClientID(
-            trackedShapes.map((trackedShape) => trackedShape.clientID),
-            objectStates.map((objectState) => ({
-                clientID: objectState.clientID,
-                keyframes: objectState.keyframes,
-            })),
-            frame,
-        );
-
-        if (commitClientID !== null) {
-            const objectState = objectStates.find(
-                (state) => state.clientID === commitClientID,
-            );
-            if (objectState) {
-                await this.commitAutoTrackLoss(
-                    objectState,
-                    commitClientID,
-                    lostClientIDs,
-                    SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE,
-                    {
-                        sessionEndEvent: 'session_stop',
-                        sessionEndDetail: 'preload_range_exhausted',
-                        noteLost: false,
-                    },
-                );
-            }
-        } else {
-            if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
-                autoTrackDiagnostics.endSession('session_stop', 'preload_range_exhausted');
-            }
-            this.invalidateAutoTrackSession();
-            this.stopAutoTrackSession();
-            notification.warning({
-                message: 'Auto Track stopped',
-                description: <CVATMarkdown>{SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE}</CVATMarkdown>,
-                duration: 8,
-            });
-        }
-
-        if (autoTrackDiagnostics.isEnabled()) {
-            autoTrackDiagnostics.patchCurrentFrame({ stopReason: 'preload_range_exhausted' });
-        }
-        return true;
-    };
-
-    private autoTrackEscapeListener = (event: KeyboardEvent): void => {
-        if (!this.autoTrackSessionActive) {
-            return;
-        }
-        if (event.key !== 'Escape' && event.key !== 'Esc' && event.keyCode !== 27) {
-            return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        this.cancelAutoTrackSession();
-    };
-
-    private getSupportedTrackers(): MLModel[] {
-        const { trackers } = this.props;
-        return trackers.filter((tracker: MLModel) => (
-            tracker.supportedShapeTypes!.includes(ShapeType.RECTANGLE) &&
-            !/sam\s*2/i.test(tracker.name) &&
-            !String(tracker.id).toLowerCase().includes('sam2')
-        ));
-    }
-
-    private async commitAutoTrackLoss(
-        objectState: ObjectState,
-        clientID: number,
-        lostClientIDs: number[],
-        reason: string,
-        options?: {
-            sessionEndEvent?: 'session_lost' | 'session_stop';
-            sessionEndDetail?: string;
-            noteLost?: boolean;
-        },
-    ): Promise<void> {
-        const sessionEndEvent = options?.sessionEndEvent ?? 'session_lost';
-        const sessionEndDetail = options?.sessionEndDetail ?? reason;
-        const noteLost = options?.noteLost ?? true;
-
-        objectState.outside = true;
-        objectState.keyframe = true;
-        autoTrackDiagnostics.emit('shape_commit_start', { clientID, reason });
-        const saveStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
-        await objectState.save();
-        this.noteAutoTrackCommittedSave();
-        autoTrackDiagnostics.patchCurrentFrame({
-            shapeSaveMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - saveStart,
-        });
-        autoTrackDiagnostics.emit('shape_commit_end', { clientID, reason });
-        lostClientIDs.push(clientID);
-        notification.warning({
-            message: 'Auto Track stopped',
-            description: <CVATMarkdown>{reason}</CVATMarkdown>,
-            duration: 8,
-        });
-        if (noteLost) {
-            autoTrackDiagnostics.noteLost();
-        }
-        autoTrackDiagnostics.endSession(sessionEndEvent, sessionEndDetail);
-        this.invalidateAutoTrackSession();
-        this.stopAutoTrackSession();
-    }
-
-    private async processAutoTrackShapeResult(
-        sessionId: number,
-        shape: MinimalShape | null,
-        state: any,
-        objectState: ObjectState,
-        trackedShape: TrackedShape,
-        lostClientIDs: number[],
-    ): Promise<'lost' | 'soft_skip' | 'valid' | 'stale'> {
-        if (!this.isAutoTrackSessionCurrent(sessionId)) {
-            autoTrackDiagnostics.recordStaleDrop({
-                requestSessionId: sessionId,
-                currentSessionId: this.autoTrackSessionId,
-                jobFrameIndex: objectState.frame,
-            });
-            return 'stale';
-        }
-
-        const history = trackedShape.autoTrackHistory ??
-            createEmptyAutoTrackHistory(trackedShape.shapePoints);
-
-        if (shape === null || shape === undefined || state?.lost) {
-            autoTrackDiagnostics.recordCandidate(null, 'lost', null);
-            autoTrackDiagnostics.recordValidation('lost', 'tracker_null_or_lost', false);
-            await this.commitAutoTrackLoss(
-                objectState,
-                trackedShape.clientID,
-                lostClientIDs,
-                'Tracker returned no box on this frame. Shape marked outside.',
-            );
-            return 'lost';
-        }
-
-        autoTrackDiagnostics.recordCandidate(shape.points, 'rectangle', null);
-        const validationStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
-        const verdict = validateAutoTrackCandidate(shape.points, history);
-        autoTrackDiagnostics.patchCurrentFrame({
-            validationMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - validationStart,
-        });
-        if (verdict === 'valid') {
-            if (!this.isAutoTrackSessionCurrent(sessionId)) {
-                autoTrackDiagnostics.recordStaleDrop({
-                    requestSessionId: sessionId,
-                    currentSessionId: this.autoTrackSessionId,
-                    jobFrameIndex: objectState.frame,
-                    stage: 'before_valid_save',
-                });
-                return 'stale';
-            }
-            objectState.outside = false;
-            objectState.keyframe = true;
-            objectState.points = shape.points;
-            autoTrackDiagnostics.emit('shape_commit_start', { clientID: trackedShape.clientID });
-            const saveStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
-            await objectState.save();
-            this.noteAutoTrackCommittedSave();
-            autoTrackDiagnostics.patchCurrentFrame({
-                shapeSaveMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - saveStart,
-            });
-            autoTrackDiagnostics.emit('shape_commit_end', { clientID: trackedShape.clientID });
-            autoTrackDiagnostics.recordCommittedShape(shape.points);
-            autoTrackDiagnostics.recordValidation('valid', null, true);
-            trackedShape.serverlessState = state;
-            trackedShape.shapePoints = shape.points;
-            trackedShape.autoTrackHistory = recordValidAutoTrackHistory(history, shape.points);
-            return 'valid';
-        }
-
-        const nextHistory = recordInvalidAutoTrackHistory(history);
-        trackedShape.autoTrackHistory = nextHistory;
-
-        if (shouldConfirmAutoTrackLoss(verdict, history)) {
-            if (!this.isAutoTrackSessionCurrent(sessionId)) {
-                autoTrackDiagnostics.recordStaleDrop({
-                    requestSessionId: sessionId,
-                    currentSessionId: this.autoTrackSessionId,
-                    jobFrameIndex: objectState.frame,
-                    stage: 'before_loss_save',
-                });
-                return 'stale';
-            }
-            autoTrackDiagnostics.recordValidation(verdict, 'confirmed_loss', false);
-            const reason = verdict === 'hard_invalid' ?
-                'Implausible ball box (large jump/size change). Shape marked outside.' :
-                'Ball box failed validation repeatedly. Shape marked outside.';
-            await this.commitAutoTrackLoss(
-                objectState,
-                trackedShape.clientID,
-                lostClientIDs,
-                reason,
-            );
-            return 'lost';
-        }
-
-        autoTrackDiagnostics.recordValidation(verdict, 'soft_skip', false);
-        return 'soft_skip';
-    }
 
     private contextmenuDisabler = (e: MouseEvent): void => {
         if (
@@ -1072,6 +927,221 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         });
     };
 
+    private collectAutoTrackTelemetry(
+        objectStates: ObjectState[],
+        trackedShapes: TrackedShape[],
+    ): {
+            activeTrackedObjectCount: number;
+            committedShapeCountForCurrentTrack: number;
+            currentTrackKeyframeCount: null;
+            currentTrackFrameSpan: number | null;
+            totalAnnotationStateCount: number;
+            totalVisibleCanvasShapeCount: null;
+        } {
+        const activeTrackedObjectCount = trackedShapes.length;
+        const primaryTracked = trackedShapes[0];
+        const clientState = primaryTracked ?
+            objectStates.find((state) => state.clientID === primaryTracked.clientID) :
+            undefined;
+        const keyframes = clientState?.keyframes ?? null;
+        let currentTrackFrameSpan: number | null = null;
+        if (
+            keyframes &&
+            typeof keyframes.first === 'number' &&
+            typeof keyframes.last === 'number'
+        ) {
+            currentTrackFrameSpan = keyframes.last - keyframes.first + 1;
+        }
+        return {
+            activeTrackedObjectCount,
+            committedShapeCountForCurrentTrack: this.autoTrackCommittedSaveCount,
+            currentTrackKeyframeCount: null,
+            currentTrackFrameSpan,
+            totalAnnotationStateCount: objectStates.length,
+            totalVisibleCanvasShapeCount: null,
+        };
+    }
+
+    private noteAutoTrackCommittedSave(): void {
+        this.autoTrackCommittedSaveCount += 1;
+        if (autoTrackDiagnostics.isEnabled()) {
+            autoTrackDiagnostics.patchCurrentFrame({
+                committedShapeCountForCurrentTrack: this.autoTrackCommittedSaveCount,
+            });
+        }
+    }
+
+    private buildAutoTrackDiagPayload(
+        sessionId: number,
+        frame: number,
+        requestType: string,
+        requestId: string,
+    ): Record<string, unknown> {
+        if (!autoTrackDiagnostics.isEnabled() || !this.autoTrackSessionActive) {
+            return {};
+        }
+        return {
+            _autoTrackDiag: {
+                sessionId,
+                jobFrameIndex: frame,
+                requestType,
+                requestId,
+            },
+        };
+    }
+
+    private async commitAutoTrackLoss(
+        objectState: ObjectState,
+        clientID: number,
+        lostClientIDs: number[],
+        reason: string,
+        options?: {
+            sessionEndEvent?: 'session_lost' | 'session_stop';
+            sessionEndDetail?: string;
+            noteLost?: boolean;
+            authorizedSessionId?: number;
+        },
+    ): Promise<void> {
+        const sessionEndEvent = options?.sessionEndEvent ?? 'session_lost';
+        const sessionEndDetail = options?.sessionEndDetail ?? reason;
+        const noteLost = options?.noteLost ?? true;
+        const authorizedSessionId = options?.authorizedSessionId;
+
+        const isAuthorized = (): boolean => (
+            authorizedSessionId === undefined ||
+            (this.isAutoTrackSessionCurrent(authorizedSessionId) && this.autoTrackSessionActive)
+        );
+
+        if (!isAuthorized()) {
+            return;
+        }
+
+        objectState.outside = true;
+        objectState.keyframe = true;
+        autoTrackDiagnostics.emit('shape_commit_start', { clientID, reason });
+        const saveStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (!isAuthorized()) {
+            return;
+        }
+        await objectState.save();
+        this.noteAutoTrackCommittedSave();
+        autoTrackDiagnostics.patchCurrentFrame({
+            shapeSaveMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - saveStart,
+        });
+        autoTrackDiagnostics.emit('shape_commit_end', { clientID, reason });
+        lostClientIDs.push(clientID);
+        notification.warning({
+            message: 'Auto Track stopped',
+            description: <CVATMarkdown>{reason}</CVATMarkdown>,
+            duration: 8,
+        });
+        if (noteLost) {
+            autoTrackDiagnostics.noteLost();
+        }
+        autoTrackDiagnostics.endSession(sessionEndEvent, sessionEndDetail);
+        this.invalidateAutoTrackSession();
+        this.stopAutoTrackSession();
+    }
+
+    private async processAutoTrackShapeResult(
+        sessionId: number,
+        shape: MinimalShape | null,
+        state: any,
+        objectState: ObjectState,
+        trackedShape: TrackedShape,
+        lostClientIDs: number[],
+    ): Promise<'lost' | 'soft_skip' | 'valid' | 'stale'> {
+        if (!this.isAutoTrackSessionCurrent(sessionId)) {
+            autoTrackDiagnostics.recordStaleDrop({
+                requestSessionId: sessionId,
+                currentSessionId: this.autoTrackSessionId,
+                jobFrameIndex: objectState.frame,
+            });
+            return 'stale';
+        }
+
+        const history = trackedShape.autoTrackHistory ??
+            createEmptyAutoTrackHistory(trackedShape.shapePoints);
+
+        if (shape === null || shape === undefined || state?.lost) {
+            autoTrackDiagnostics.recordCandidate(null, 'lost', null);
+            autoTrackDiagnostics.recordValidation('lost', 'tracker_null_or_lost', false);
+            await this.commitAutoTrackLoss(
+                objectState,
+                trackedShape.clientID,
+                lostClientIDs,
+                'Tracker returned no box on this frame. Shape marked outside.',
+                { authorizedSessionId: sessionId },
+            );
+            return 'lost';
+        }
+
+        autoTrackDiagnostics.recordCandidate(shape.points, 'rectangle', null);
+        const validationStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const verdict = validateAutoTrackCandidate(shape.points, history);
+        autoTrackDiagnostics.patchCurrentFrame({
+            validationMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - validationStart,
+        });
+        if (verdict === 'valid') {
+            if (!this.isAutoTrackSessionCurrent(sessionId)) {
+                autoTrackDiagnostics.recordStaleDrop({
+                    requestSessionId: sessionId,
+                    currentSessionId: this.autoTrackSessionId,
+                    jobFrameIndex: objectState.frame,
+                    stage: 'before_valid_save',
+                });
+                return 'stale';
+            }
+            objectState.outside = false;
+            objectState.keyframe = true;
+            objectState.points = shape.points;
+            autoTrackDiagnostics.emit('shape_commit_start', { clientID: trackedShape.clientID });
+            const saveStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            await objectState.save();
+            this.noteAutoTrackCommittedSave();
+            autoTrackDiagnostics.patchCurrentFrame({
+                shapeSaveMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - saveStart,
+            });
+            autoTrackDiagnostics.emit('shape_commit_end', { clientID: trackedShape.clientID });
+            autoTrackDiagnostics.recordCommittedShape(shape.points);
+            autoTrackDiagnostics.recordValidation('valid', null, true);
+            trackedShape.serverlessState = state;
+            trackedShape.shapePoints = shape.points;
+            trackedShape.autoTrackHistory = recordValidAutoTrackHistory(history, shape.points);
+            return 'valid';
+        }
+
+        const nextHistory = recordInvalidAutoTrackHistory(history);
+        trackedShape.autoTrackHistory = nextHistory;
+
+        if (shouldConfirmAutoTrackLoss(verdict, history)) {
+            if (!this.isAutoTrackSessionCurrent(sessionId)) {
+                autoTrackDiagnostics.recordStaleDrop({
+                    requestSessionId: sessionId,
+                    currentSessionId: this.autoTrackSessionId,
+                    jobFrameIndex: objectState.frame,
+                    stage: 'before_loss_save',
+                });
+                return 'stale';
+            }
+            autoTrackDiagnostics.recordValidation(verdict, 'confirmed_loss', false);
+            const reason = verdict === 'hard_invalid' ?
+                'Implausible ball box (large jump/size change). Shape marked outside.' :
+                'Ball box failed validation repeatedly. Shape marked outside.';
+            await this.commitAutoTrackLoss(
+                objectState,
+                trackedShape.clientID,
+                lostClientIDs,
+                reason,
+                { authorizedSessionId: sessionId },
+            );
+            return 'lost';
+        }
+
+        autoTrackDiagnostics.recordValidation(verdict, 'soft_skip', false);
+        return 'soft_skip';
+    }
+
     private drawIntermediateShapesOnCanvas(): void {
         const { canvasInstance } = this.props;
         const { convertMasksToPolygons, thresholdValue } = this.state;
@@ -1208,7 +1278,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         };
 
         if (prevProps.frame !== frame && trackedShapes.length) {
-            const autoTrackSessionId = this.autoTrackSessionId;
+            const { autoTrackSessionId } = this;
             // 1. find all trackable objects on the current frame
             // 2. divide them into two groups: with relevant state, without relevant state
             const trackingData = trackedShapes.reduce<AccumulatorType>(
@@ -1345,6 +1415,9 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                 }
 
                 for (const [trackerID, trackableObjects] of trackingData.stateful) {
+                    if (!this.isAutoTrackSessionCurrent(autoTrackSessionId)) {
+                        break;
+                    }
                     // 4. run tracking for all the objects
                     let hideMessage = null;
                     try {
@@ -1401,6 +1474,9 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                                 continue;
                             }
                             if (this.autoTrackSessionActive) {
+                                if (!this.isAutoTrackSessionCurrent(autoTrackSessionId)) {
+                                    break;
+                                }
                                 // eslint-disable-next-line no-await-in-loop
                                 const result = await this.processAutoTrackShapeResult(
                                     autoTrackSessionId,
@@ -1413,41 +1489,50 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                                 if (result === 'stale') {
                                     break;
                                 }
-                            } else if (shape === null || shape === undefined) {
-                                objectState.outside = true;
-                                // eslint-disable-next-line no-await-in-loop
-                                await objectState.save();
-                                lostClientIDs.push(clientID);
-                            } else {
-                                objectState.outside = false;
-                                objectState.keyframe = true;
-                                objectState.points = shape.points;
-                                // eslint-disable-next-line no-await-in-loop
-                                await objectState.save();
-                                trackedShape.serverlessState = state;
-                                trackedShape.shapePoints = shape.points;
+                            } else if (shouldCommitShapeForInactiveTrackingBranch(
+                                autoTrackSessionId,
+                                this.autoTrackSessionId,
+                                this.autoTrackSessionActive,
+                            )) {
+                                if (shape === null || shape === undefined) {
+                                    objectState.outside = true;
+                                    // eslint-disable-next-line no-await-in-loop
+                                    await objectState.save();
+                                    lostClientIDs.push(clientID);
+                                } else {
+                                    objectState.outside = false;
+                                    objectState.keyframe = true;
+                                    objectState.points = shape.points;
+                                    // eslint-disable-next-line no-await-in-loop
+                                    await objectState.save();
+                                    trackedShape.serverlessState = state;
+                                    trackedShape.shapePoints = shape.points;
+                                }
                             }
                         }
                         this.setState({ trackedShapes: updatedTrackedShapes });
                     } catch (error: any) {
                         // eslint-disable-next-line no-await-in-loop
-                        if (!await this.handleAutoTrackLambdaError(
+                        const boundaryHandling = await this.handleAutoTrackLambdaError(
                             error,
                             frame,
+                            autoTrackSessionId,
+                            trackableObjects.clientIDs,
                             objectStates,
-                            trackedShapes,
                             lostClientIDs,
-                        )) {
-                            if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
-                                autoTrackDiagnostics.endSession('session_error', error.message);
-                            }
-                            this.stopAutoTrackSession();
-                            notification.error({
-                                message: 'Tracking error',
-                                description: <CVATMarkdown>{error.message}</CVATMarkdown>,
-                                duration: null,
-                            });
+                        );
+                        if (boundaryHandling === 'boundary_stop' || boundaryHandling === 'boundary_stale') {
+                            break;
                         }
+                        if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
+                            autoTrackDiagnostics.endSession('session_error', error.message);
+                        }
+                        this.stopAutoTrackSession();
+                        notification.error({
+                            message: 'Tracking error',
+                            description: <CVATMarkdown>{error.message}</CVATMarkdown>,
+                            duration: null,
+                        });
                     } finally {
                         if (hideMessage) hideMessage();
                     }
@@ -1637,7 +1722,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
 
     private renderTrackerBlock(): JSX.Element {
         const { jobInstance, frame } = this.props;
-        const { activeTracker, activeLabelID, fetching, autoTrackActive } = this.state;
+        const { activeTracker, fetching, autoTrackActive } = this.state;
 
         const supportedTrackers = this.getSupportedTrackers();
         const trackDisabled = !activeTracker || fetching || frame === jobInstance.stopFrame;

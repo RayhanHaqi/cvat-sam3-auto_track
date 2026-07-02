@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 export interface AutoTrackKeyframeInfo {
-    prev?: number;
-    last?: number;
+    prev?: number | null;
+    last?: number | null;
 }
 
 export interface AutoTrackObjectSnapshot {
@@ -19,12 +19,38 @@ export interface OutsideKeyframeCommit {
     keyframe: true;
 }
 
+export function filterAutoTrackClientIDs(clientIDs: ReadonlyArray<number | null | undefined>): number[] {
+    return clientIDs.filter((clientID): clientID is number => (
+        typeof clientID === 'number' && Number.isFinite(clientID)
+    ));
+}
+
+export function toAutoTrackObjectSnapshots(
+    objectStates: ReadonlyArray<{
+        clientID: number | null;
+        keyframes?: AutoTrackKeyframeInfo | null;
+        outside?: boolean;
+    }>,
+): AutoTrackObjectSnapshot[] {
+    return objectStates.flatMap((objectState) => {
+        if (typeof objectState.clientID !== 'number' || !Number.isFinite(objectState.clientID)) {
+            return [];
+        }
+        return [{
+            clientID: objectState.clientID,
+            keyframes: objectState.keyframes,
+            outside: objectState.outside,
+        }];
+    });
+}
+
 export function findAutoTrackBoundaryCommitClientID(
-    trackedClientIDs: number[],
-    objectStates: AutoTrackObjectSnapshot[],
+    trackerGroupClientIDs: ReadonlyArray<number | null | undefined>,
+    objectStates: ReadonlyArray<AutoTrackObjectSnapshot>,
     boundaryFrame: number,
 ): number | null {
-    for (const clientID of trackedClientIDs) {
+    const normalizedGroupClientIDs = filterAutoTrackClientIDs(trackerGroupClientIDs);
+    for (const clientID of normalizedGroupClientIDs) {
         const objectState = objectStates.find((state) => state.clientID === clientID);
         if (!objectState?.keyframes) {
             continue;
@@ -34,6 +60,9 @@ export function findAutoTrackBoundaryCommitClientID(
             continue;
         }
         if (typeof last === 'number' && last >= boundaryFrame) {
+            continue;
+        }
+        if (objectState.outside === true && typeof last === 'number' && last === boundaryFrame) {
             continue;
         }
         return clientID;
@@ -58,4 +87,20 @@ export function shouldAutoAdvanceAfterAutoTrackFrame(
 
 export function isGenericLambdaTrackingError(error: unknown): boolean {
     return !((error as { lambdaErrorCode?: string } | null)?.lambdaErrorCode === 'preload_range_exhausted');
+}
+
+export function isAutoTrackSessionAuthoritative(
+    sessionId: number,
+    currentSessionId: number,
+    autoTrackSessionActive: boolean,
+): boolean {
+    return autoTrackSessionActive && sessionId === currentSessionId;
+}
+
+export function shouldCommitShapeForInactiveTrackingBranch(
+    sessionId: number,
+    currentSessionId: number,
+    autoTrackSessionActive: boolean,
+): boolean {
+    return !autoTrackSessionActive && sessionId === currentSessionId;
 }
