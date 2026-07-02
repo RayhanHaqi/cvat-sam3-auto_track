@@ -90,6 +90,7 @@ def _auto_track_diag_log(event_name: str, **fields: Any) -> None:
 
 
 SAM3_TRACKER_FUNCTION_ID = "meta-sam3-tracker-v4"
+SAM3_PRELOAD_RANGE_EXHAUSTED_CODE = "preload_range_exhausted"
 SAM3_PRELOAD_CHUNK_CAP = 96
 SAM3_NUCLIO_MAX_REQUEST_BODY_BYTES = 268_435_456
 SAM3_PRELOAD_MAX_PAYLOAD_BYTES = 240 * 1024 * 1024
@@ -1535,6 +1536,21 @@ class LambdaJob:
             )
 
 
+def format_lambda_http_error(err: requests.HTTPError) -> str | dict[str, str]:
+    response = err.response
+    if response is not None:
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            code = body.get("code")
+            message = body.get("message")
+            if code == SAM3_PRELOAD_RANGE_EXHAUSTED_CODE and isinstance(message, str):
+                return {"code": code, "message": message}
+    return str(err)
+
+
 def return_response(success_code=status.HTTP_200_OK):
     def wrap_response(func):
         @wraps(func)
@@ -1548,7 +1564,7 @@ def return_response(success_code=status.HTTP_200_OK):
                 data = str(err)
             except requests.HTTPError as err:
                 status_code = err.response.status_code
-                data = str(err)
+                data = format_lambda_http_error(err)
             except requests.Timeout as err:
                 status_code = status.HTTP_504_GATEWAY_TIMEOUT
                 data = str(err)

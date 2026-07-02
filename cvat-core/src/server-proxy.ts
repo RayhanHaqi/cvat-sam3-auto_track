@@ -186,6 +186,19 @@ function generateError(errorData: AxiosError): ServerError {
             }
 
             if (typeof errorData.response.data === 'object') {
+                const payload = errorData.response.data as Record<string, unknown>;
+                if (
+                    payload.code === 'preload_range_exhausted' &&
+                    typeof payload.message === 'string'
+                ) {
+                    const serverError = new ServerError(payload.message, errorData.response.status);
+                    Object.defineProperty(serverError, 'lambdaErrorCode', {
+                        value: payload.code,
+                        enumerable: true,
+                    });
+                    return serverError;
+                }
+
                 if ('rq_id' in errorData.response.data) {
                     return new ServerError(
                         `A request with this identifier is already being processed (${errorData.response.data.rq_id})`,

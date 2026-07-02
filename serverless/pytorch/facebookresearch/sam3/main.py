@@ -16,6 +16,8 @@ from model_handler import (
     load_sam3_config,
 )
 
+PRELOAD_RANGE_EXHAUSTED_CODE = "preload_range_exhausted"
+
 
 def _set_process_name(name: str) -> None:
     """Set process title for ps and nvidia-smi (argv[0] + Linux comm)."""
@@ -155,7 +157,12 @@ def handler(context, event):
     except PreloadRangeExhaustedError as exc:
         context.logger.warn(str(exc))
         return context.Response(
-            body=json.dumps({"error": str(exc)}),
+            body=json.dumps(
+                {
+                    "code": PRELOAD_RANGE_EXHAUSTED_CODE,
+                    "message": str(exc),
+                }
+            ),
             headers={},
             content_type="application/json",
             status_code=400,

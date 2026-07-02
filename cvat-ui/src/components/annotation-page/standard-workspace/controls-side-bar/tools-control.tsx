@@ -32,6 +32,10 @@ import {
 } from 'cvat-core-wrapper';
 import openCVWrapper from 'utils/opencv-wrapper/opencv-wrapper';
 import {
+    isSam3PreloadRangeExhaustedError,
+    SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE,
+} from 'utils/sam3-auto-track-errors';
+import {
     CombinedState, ActiveControl, ToolsBlockerState, PluginComponent,
 } from 'reducers';
 import {
@@ -498,6 +502,26 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         this.invalidateAutoTrackSession();
         this.stopAutoTrackSession();
         this.props.canvasInstance.cancel();
+    };
+
+    private handleAutoTrackLambdaError(error: any, frame?: number): boolean {
+        if (!isSam3PreloadRangeExhaustedError(error)) {
+            return false;
+        }
+        if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
+            autoTrackDiagnostics.endSession('session_stop', 'preload_range_exhausted');
+        }
+        this.invalidateAutoTrackSession();
+        this.stopAutoTrackSession();
+        notification.warning({
+            message: 'Auto Track stopped',
+            description: <CVATMarkdown>{SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE}</CVATMarkdown>,
+            duration: 8,
+        });
+        if (frame !== undefined && autoTrackDiagnostics.isEnabled()) {
+            autoTrackDiagnostics.patchCurrentFrame({ stopReason: 'preload_range_exhausted' });
+        }
+        return true;
     };
 
     private autoTrackEscapeListener = (event: KeyboardEvent): void => {
@@ -1356,15 +1380,17 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                         }
                         this.setState({ trackedShapes: updatedTrackedShapes });
                     } catch (error: any) {
-                        if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
-                            autoTrackDiagnostics.endSession('session_error', error.message);
+                        if (!this.handleAutoTrackLambdaError(error, frame)) {
+                            if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
+                                autoTrackDiagnostics.endSession('session_error', error.message);
+                            }
+                            this.stopAutoTrackSession();
+                            notification.error({
+                                message: 'Tracking error',
+                                description: <CVATMarkdown>{error.message}</CVATMarkdown>,
+                                duration: null,
+                            });
                         }
-                        this.stopAutoTrackSession();
-                        notification.error({
-                            message: 'Tracking error',
-                            description: <CVATMarkdown>{error.message}</CVATMarkdown>,
-                            duration: null,
-                        });
                     } finally {
                         if (hideMessage) hideMessage();
                     }
