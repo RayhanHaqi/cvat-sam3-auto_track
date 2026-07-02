@@ -32,6 +32,9 @@ import {
 } from 'cvat-core-wrapper';
 import openCVWrapper from 'utils/opencv-wrapper/opencv-wrapper';
 import {
+    findAutoTrackBoundaryCommitClientID,
+} from 'utils/auto-track-boundary-commit';
+import {
     isSam3PreloadRangeExhaustedError,
     SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE,
 } from 'utils/sam3-auto-track-errors';
@@ -504,21 +507,57 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         this.props.canvasInstance.cancel();
     };
 
-    private handleAutoTrackLambdaError(error: any, frame?: number): boolean {
+    private async handleAutoTrackLambdaError(
+        error: any,
+        frame: number,
+        objectStates: ObjectState[],
+        trackedShapes: TrackedShape[],
+        lostClientIDs: number[],
+    ): Promise<boolean> {
         if (!isSam3PreloadRangeExhaustedError(error)) {
             return false;
         }
-        if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
-            autoTrackDiagnostics.endSession('session_stop', 'preload_range_exhausted');
+
+        const commitClientID = findAutoTrackBoundaryCommitClientID(
+            trackedShapes.map((trackedShape) => trackedShape.clientID),
+            objectStates.map((objectState) => ({
+                clientID: objectState.clientID,
+                keyframes: objectState.keyframes,
+            })),
+            frame,
+        );
+
+        if (commitClientID !== null) {
+            const objectState = objectStates.find(
+                (state) => state.clientID === commitClientID,
+            );
+            if (objectState) {
+                await this.commitAutoTrackLoss(
+                    objectState,
+                    commitClientID,
+                    lostClientIDs,
+                    SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE,
+                    {
+                        sessionEndEvent: 'session_stop',
+                        sessionEndDetail: 'preload_range_exhausted',
+                        noteLost: false,
+                    },
+                );
+            }
+        } else {
+            if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
+                autoTrackDiagnostics.endSession('session_stop', 'preload_range_exhausted');
+            }
+            this.invalidateAutoTrackSession();
+            this.stopAutoTrackSession();
+            notification.warning({
+                message: 'Auto Track stopped',
+                description: <CVATMarkdown>{SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE}</CVATMarkdown>,
+                duration: 8,
+            });
         }
-        this.invalidateAutoTrackSession();
-        this.stopAutoTrackSession();
-        notification.warning({
-            message: 'Auto Track stopped',
-            description: <CVATMarkdown>{SAM3_PRELOAD_RANGE_EXHAUSTED_USER_MESSAGE}</CVATMarkdown>,
-            duration: 8,
-        });
-        if (frame !== undefined && autoTrackDiagnostics.isEnabled()) {
+
+        if (autoTrackDiagnostics.isEnabled()) {
             autoTrackDiagnostics.patchCurrentFrame({ stopReason: 'preload_range_exhausted' });
         }
         return true;
@@ -550,7 +589,16 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         clientID: number,
         lostClientIDs: number[],
         reason: string,
+        options?: {
+            sessionEndEvent?: 'session_lost' | 'session_stop';
+            sessionEndDetail?: string;
+            noteLost?: boolean;
+        },
     ): Promise<void> {
+        const sessionEndEvent = options?.sessionEndEvent ?? 'session_lost';
+        const sessionEndDetail = options?.sessionEndDetail ?? reason;
+        const noteLost = options?.noteLost ?? true;
+
         objectState.outside = true;
         objectState.keyframe = true;
         autoTrackDiagnostics.emit('shape_commit_start', { clientID, reason });
@@ -567,8 +615,10 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
             description: <CVATMarkdown>{reason}</CVATMarkdown>,
             duration: 8,
         });
-        autoTrackDiagnostics.noteLost();
-        autoTrackDiagnostics.endSession('session_lost', reason);
+        if (noteLost) {
+            autoTrackDiagnostics.noteLost();
+        }
+        autoTrackDiagnostics.endSession(sessionEndEvent, sessionEndDetail);
         this.invalidateAutoTrackSession();
         this.stopAutoTrackSession();
     }
@@ -1380,7 +1430,14 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                         }
                         this.setState({ trackedShapes: updatedTrackedShapes });
                     } catch (error: any) {
-                        if (!this.handleAutoTrackLambdaError(error, frame)) {
+                        // eslint-disable-next-line no-await-in-loop
+                        if (!await this.handleAutoTrackLambdaError(
+                            error,
+                            frame,
+                            objectStates,
+                            trackedShapes,
+                            lostClientIDs,
+                        )) {
                             if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
                                 autoTrackDiagnostics.endSession('session_error', error.message);
                             }
