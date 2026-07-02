@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import textwrap
 from copy import deepcopy
 from datetime import timedelta
@@ -92,6 +93,81 @@ SAM3_TRACKER_FUNCTION_ID = "meta-sam3-tracker-v4"
 SAM3_PRELOAD_CHUNK_CAP = 96
 SAM3_NUCLIO_MAX_REQUEST_BODY_BYTES = 268_435_456
 SAM3_PRELOAD_MAX_PAYLOAD_BYTES = 240 * 1024 * 1024
+SAM3_RAW_SOURCE_FRAME_RE = re.compile(r"frame_(\d+)\.png$", re.IGNORECASE)
+
+
+def parse_sam3_raw_source_frame_index(source_path: str | None) -> int | None:
+    if not source_path:
+        return None
+    match = SAM3_RAW_SOURCE_FRAME_RE.search(os.path.basename(source_path))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def apply_sam3_source_timeline_guard(
+    candidate_frames: list[int],
+    frame_to_source_path,
+) -> tuple[list[int], dict[str, Any]]:
+    empty_diag = {
+        "sourceTimelineVerified": False,
+        "preloadStartRawIndex": None,
+        "preloadEndRawIndex": None,
+        "firstSourceGapAtCvatFrame": None,
+        "firstSourceGapDelta": None,
+        "preloadStopReason": "empty",
+    }
+    if not candidate_frames:
+        return [], empty_diag
+
+    included_frames: list[int] = []
+    prev_raw_index: int | None = None
+    first_gap_cvat_frame: int | None = None
+    first_gap_delta: int | None = None
+    stop_reason = "job_end"
+
+    for cvat_frame in candidate_frames:
+        raw_index = parse_sam3_raw_source_frame_index(frame_to_source_path(cvat_frame))
+        if raw_index is None:
+            return candidate_frames, {
+                "sourceTimelineVerified": False,
+                "preloadStartRawIndex": None,
+                "preloadEndRawIndex": None,
+                "firstSourceGapAtCvatFrame": None,
+                "firstSourceGapDelta": None,
+                "preloadStopReason": "continuity_unverified",
+            }
+
+        if prev_raw_index is not None and raw_index - prev_raw_index != 1:
+            first_gap_cvat_frame = cvat_frame
+            first_gap_delta = raw_index - prev_raw_index
+            stop_reason = "source_timeline_gap"
+            break
+
+        included_frames.append(cvat_frame)
+        prev_raw_index = raw_index
+
+    if stop_reason != "source_timeline_gap":
+        if len(candidate_frames) >= SAM3_PRELOAD_CHUNK_CAP:
+            stop_reason = "chunk_cap"
+        else:
+            stop_reason = "job_end"
+
+    start_raw = parse_sam3_raw_source_frame_index(
+        frame_to_source_path(included_frames[0]) if included_frames else None
+    )
+    end_raw = parse_sam3_raw_source_frame_index(
+        frame_to_source_path(included_frames[-1]) if included_frames else None
+    )
+
+    return included_frames, {
+        "sourceTimelineVerified": True,
+        "preloadStartRawIndex": start_raw,
+        "preloadEndRawIndex": end_raw,
+        "firstSourceGapAtCvatFrame": first_gap_cvat_frame,
+        "firstSourceGapDelta": first_gap_delta,
+        "preloadStopReason": stop_reason,
+    }
 
 
 def measure_sam3_nuclio_payload_bytes(payload: dict[str, Any]) -> int:
@@ -795,7 +871,18 @@ class LambdaFunction:
                 code=status.HTTP_400_BAD_REQUEST,
             )
 
-    def _sam3_preload_frame_indices(self, db_job: Job, base_frame: int) -> list[int]:
+    def _sam3_source_frame_path(self, db_task: Task, frame_idx: int) -> str | None:
+        db_data = db_task.data
+        if db_data is None:
+            return None
+        image = (
+            db_data.images.filter(frame=frame_idx, is_placeholder=False)
+            .only("path")
+            .first()
+        )
+        return image.path if image else None
+
+    def _sam3_preload_candidate_frame_indices(self, db_job: Job, base_frame: int) -> list[int]:
         self._assert_sam3_contiguous_range_job(db_job)
         segment = db_job.segment
         last_frame = segment.stop_frame
@@ -807,17 +894,52 @@ class LambdaFunction:
         count = min(SAM3_PRELOAD_CHUNK_CAP, last_frame - base_frame + 1)
         return list(range(base_frame, base_frame + count))
 
+    def _sam3_preload_frame_indices(
+        self,
+        db_job: Job,
+        base_frame: int,
+        db_task: Task,
+    ) -> list[int]:
+        frame_indices, _timeline = self._resolve_sam3_preload_frames(db_task, db_job, base_frame)
+        return frame_indices
+
+    def _resolve_sam3_preload_frames(
+        self,
+        db_task: Task,
+        db_job: Job,
+        base_frame: int,
+    ) -> tuple[list[int], dict[str, Any]]:
+        candidate_frames = self._sam3_preload_candidate_frame_indices(db_job, base_frame)
+        return apply_sam3_source_timeline_guard(
+            candidate_frames,
+            lambda frame_idx: self._sam3_source_frame_path(db_task, frame_idx),
+        )
+
     def _build_sam3_preload_fields(
         self,
         db_task: Task,
         db_job: Job,
         base_frame: int,
     ) -> dict[str, Any]:
-        frame_indices = self._sam3_preload_frame_indices(db_job, base_frame)
+        frame_indices, timeline_diag = self._resolve_sam3_preload_frames(
+            db_task,
+            db_job,
+            base_frame,
+        )
         if not frame_indices:
             raise ValidationError(
                 "SAM3 preload produced zero frames",
                 code=status.HTTP_400_BAD_REQUEST,
+            )
+        slogger.glob.info(
+            "SAM3 preload source timeline: %s",
+            json.dumps(timeline_diag, default=str),
+        )
+        if _auto_track_diag_enabled():
+            _auto_track_diag_log(
+                "sam3_preload_source_timeline",
+                preloadBaseFrame=base_frame,
+                **timeline_diag,
             )
         preload_images = [self._get_image(db_task, frame_idx) for frame_idx in frame_indices]
         return {
