@@ -871,6 +871,8 @@ class LambdaFunction:
                 annotations=response_filtered,
             )
         elif self.kind == FunctionKind.TRACKER:
+            if response.get("tracking_status") == "preload_exhausted":
+                return response
             if "shapes" in response and not self.supported_shape_types:
                 response["shapes"] = [
                     None if points is None else {"type": ShapeType.RECTANGLE, "points": points}

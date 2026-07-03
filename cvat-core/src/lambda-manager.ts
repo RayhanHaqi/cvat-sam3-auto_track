@@ -37,6 +37,9 @@ export interface MinimalShape {
 export interface TrackerResults {
     states: any[];
     shapes: (MinimalShape | null)[];
+    tracking_status?: string;
+    tracking_stop_reason?: string;
+    preloaded_until_frame?: number;
 }
 
 class LambdaManager {

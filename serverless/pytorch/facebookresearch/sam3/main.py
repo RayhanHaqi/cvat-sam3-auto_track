@@ -153,12 +153,19 @@ def handler(context, event):
             status_code=400,
         )
     except PreloadRangeExhaustedError as exc:
-        context.logger.warn(str(exc))
+        context.logger.info(str(exc))
+        response_body = {
+            "tracking_status": "preload_exhausted",
+            "tracking_stop_reason": "tracking_window_complete",
+            "preloaded_until_frame": exc.preloaded_until_frame,
+            "shapes": [],
+            "states": [],
+        }
         return context.Response(
-            body=json.dumps({"error": str(exc)}),
+            body=json.dumps(response_body),
             headers={},
             content_type="application/json",
-            status_code=400,
+            status_code=200,
         )
     except Exception as exc:
         context.logger.error(f"SAM3 tracker failed: {exc}")
