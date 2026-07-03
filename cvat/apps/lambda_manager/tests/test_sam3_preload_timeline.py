@@ -414,3 +414,60 @@ class Sam3SourceTimelineGuardIntegrationTests(_LambdaTestCaseBase):
         self.assertEqual(diag["firstSourceGapAtCvatFrame"], 112)
         self.assertEqual(diag["firstSourceGapDelta"], 145)
         self.assertEqual(diag["preloadStopReason"], "source_timeline_gap")
+
+
+class Sam3PreloadTerminalResponseTests(_LambdaTestCaseBase):
+    def setUp(self):
+        super().setUp()
+        images_main_task = self._generate_task_images(3)
+        self.main_task = self._create_task(tasks["main"], images_main_task)
+
+    def _sam3_function(self) -> LambdaFunction:
+        from cvat.apps.lambda_manager.views import LambdaGateway
+
+        gateway = LambdaGateway()
+        return LambdaFunction(gateway, functions["positive"][SAM3_TRACKER_FUNCTION_ID])
+
+    def test_preload_exhausted_terminal_response_passes_through(self):
+        from cvat.apps.engine.models import Job, Task
+
+        from django.core.signing import TimestampSigner
+
+        db_task = Task.objects.get(pk=self.main_task["id"])
+        job = Job.objects.get(segment__task_id=db_task.id)
+        func = self._sam3_function()
+        signer = TimestampSigner(salt=f"cvat-tracker-state:{func.id}")
+        signed_state = signer.sign(
+            json.dumps(
+                {
+                    "session_key": "sam3-test",
+                    "base_frame": 0,
+                    "preloaded_count": 96,
+                    "preloaded_until_frame": 95,
+                },
+                separators=(",", ":"),
+            )
+        )
+        terminal_response = {
+            "tracking_status": "preload_exhausted",
+            "tracking_stop_reason": "tracking_window_complete",
+            "preloaded_until_frame": 95,
+            "shapes": [],
+            "states": [],
+        }
+
+        with mock.patch.object(func.gateway, "invoke", return_value=terminal_response):
+            result = func.invoke(
+                db_task,
+                {"frame": 96, "states": [signed_state]},
+                db_job=job,
+            )
+
+        self.assertEqual(result["tracking_status"], "preload_exhausted")
+        self.assertEqual(result["tracking_stop_reason"], "tracking_window_complete")
+        self.assertEqual(result["preloaded_until_frame"], 95)
+        self.assertEqual(result["shapes"], [])
+        self.assertEqual(result["states"], [])
+
+    def test_sam3_preload_chunk_cap_remains_96(self):
+        self.assertEqual(SAM3_PRELOAD_CHUNK_CAP, 96)

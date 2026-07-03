@@ -416,6 +416,21 @@ class ValidationError(Exception):
 class PreloadRangeExhaustedError(Exception):
     """Raised when tracking requests a frame outside the bounded preload chunk."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        base_frame: int,
+        preloaded_count: int,
+        preloaded_until_frame: int,
+        requested_frame: int,
+    ) -> None:
+        super().__init__(message)
+        self.base_frame = base_frame
+        self.preloaded_count = preloaded_count
+        self.preloaded_until_frame = preloaded_until_frame
+        self.requested_frame = requested_frame
+
 
 def _patch_edt():
     try:
@@ -910,10 +925,19 @@ class ModelHandler:
         relative_frame = int(frame_index) - base_frame
 
         if relative_frame < 0 or relative_frame >= preloaded_count:
+            preloaded_until_frame = int(
+                prev_state.get("preloaded_until_frame")
+                or sess.get("preloaded_until_frame")
+                or base_frame + preloaded_count - 1
+            )
             raise PreloadRangeExhaustedError(
                 "Preloaded frame range exhausted at frame "
                 f"{frame_index} (chunk base={base_frame}, count={preloaded_count}); "
-                "re-seed tracking from a new annotation frame"
+                "re-seed tracking from a new annotation frame",
+                base_frame=base_frame,
+                preloaded_count=preloaded_count,
+                preloaded_until_frame=preloaded_until_frame,
+                requested_frame=int(frame_index),
             )
         if not sess.get("cache_ready"):
             raise ValidationError("SAM3 preload cache is not ready; re-seed tracking")

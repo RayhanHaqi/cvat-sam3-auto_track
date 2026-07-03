@@ -1309,6 +1309,22 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                             break;
                         }
 
+                        if (response.tracking_status === 'preload_exhausted') {
+                            if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
+                                autoTrackDiagnostics.endSession(
+                                    'session_complete',
+                                    response.tracking_stop_reason || 'preload_exhausted',
+                                );
+                            }
+                            this.stopAutoTrackSession();
+                            notification.info({
+                                message: 'Tracking window complete',
+                                description: 'Start a new Auto Track session for the next segment.',
+                                duration: 4,
+                            });
+                            break;
+                        }
+
                         response.shapes = response.shapes.map(trackedRectangleMapper);
                         const updatedTrackedShapes = [...trackedShapes];
                         for (let i = 0; i < trackableObjects.clientIDs.length; i++) {
