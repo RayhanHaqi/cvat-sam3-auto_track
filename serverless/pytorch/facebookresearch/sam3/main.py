@@ -34,7 +34,7 @@ def _set_process_name(name: str) -> None:
 def init_context(context):
     _set_process_name("sam3")
     config = load_sam3_config()
-    context.logger.info("Init SAM 3.1 context...")
+    context.logger.info("Init SAM 3 context...")
     context.logger.info(
         "SAM3 config: prompt_mode=%s output_policy=%s prob_thresh=%s ir_refine=%s ir_stop_on_missing=%s text_prompt=%r",
         config.prompt_mode,
@@ -45,11 +45,11 @@ def init_context(context):
         config.text_prompt if config.prompt_mode != "box" else "",
     )
     context.user_data.model = ModelHandler(config=config)
-    context.logger.info("SAM 3.1 ready.")
+    context.logger.info("SAM 3 ready.")
 
 
 def handler(context, event):
-    context.logger.info("Run SAM 3.1 tracker")
+    context.logger.info("Run SAM 3 tracker")
     try:
         data = event.body
         diag_meta = data.pop("_autoTrackDiag", None)

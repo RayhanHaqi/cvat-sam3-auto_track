@@ -2,7 +2,7 @@ metadata:
   name: meta-sam3-tracker-v4
   namespace: cvat
   annotations:
-    name: SAM 3.1 Video Tracker v4
+    name: SAM 3 Video Tracker v4
     type: tracker
     framework: pytorch
     spec: |
@@ -11,7 +11,7 @@ metadata:
       ]
 
 spec:
-  description: SAM 3.1 single-object video tracker
+  description: SAM 3 single-object video tracker
   runtime: 'python:3.10'
   handler: main:handler
   eventTimeout: 120s
