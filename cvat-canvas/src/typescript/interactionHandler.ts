@@ -14,6 +14,12 @@ import {
     InteractionData, InteractionResult, Geometry,
     Configuration, CanvasHint,
 } from './canvasModel';
+import {
+    interactionRectangleOpacity,
+    TRANSPARENT_INTERACTION_RECT_FILL_STYLE,
+    mergeInteractionSettings,
+    clearTransparentBoxFillOnRelease,
+} from './interaction_box_style';
 
 export interface InteractionHandler {
     transform(geometry: Geometry): void;
@@ -89,6 +95,7 @@ export class InteractionHandlerImpl implements InteractionHandler {
             points_type: 'any',
             removalStrategy: 'any',
             appendCursorPositionAsPoint: false,
+            transparentBoxFill: false,
         };
         this.container = adoptedContent;
         this.geometry = geometry;
@@ -158,6 +165,7 @@ export class InteractionHandlerImpl implements InteractionHandler {
         this.clearPromptsAndButtons();
         this.clearIntermediateShapes();
         this.crosshair.hide();
+        this.settings = clearTransparentBoxFillOnRelease(this.settings);
     }
 
     private isWithinFrame(x: number, y: number): boolean {
@@ -167,6 +175,29 @@ export class InteractionHandlerImpl implements InteractionHandler {
         return imageX >= 0 && imageX < width && imageY >= 0 && imageY < height;
     }
 
+    private applyInteractionRectangleStyle(rect: SVG.Rect): void {
+        rect.stroke({ color: '#000000', width: this.effectiveStrokeWidth });
+        rect.addClass('cvat_interaction_rectangle');
+        const rectangleOpacity = interactionRectangleOpacity(
+            this.settings.transparentBoxFill,
+            this.effectiveShapeOpacity,
+        );
+        if (rectangleOpacity === null) {
+            rect.fill('none');
+            rect.attr({
+                style: TRANSPARENT_INTERACTION_RECT_FILL_STYLE,
+                'fill-opacity': 0,
+                'stroke-opacity': 1,
+            });
+            rect.opacity(1);
+            return;
+        }
+
+        rect.fill('rgba(0, 0, 0, 0)');
+        rect.attr({ style: null, 'fill-opacity': null, 'stroke-opacity': null });
+        rect.opacity(rectangleOpacity);
+    }
+
     private drawBox(): void {
         if (this.command === 'draw_box') {
             return;
@@ -174,11 +205,8 @@ export class InteractionHandlerImpl implements InteractionHandler {
 
         this.command = 'draw_box';
         const initNewDrawingBox = (): void => {
-            this.currentRectangle = this.container.rect()
-                .fill('rgba(0, 0, 0, 0)')
-                .stroke({ color: '#000000', width: this.effectiveStrokeWidth })
-                .opacity(this.effectiveShapeOpacity)
-                .addClass('cvat_interaction_rectangle');
+            this.currentRectangle = this.container.rect();
+            this.applyInteractionRectangleStyle(this.currentRectangle);
 
             this.currentRectangle.on('drawstop.interaction', () => {
                 const rectangle = this.currentRectangle.clone() as SVG.Rect;
@@ -502,13 +530,41 @@ export class InteractionHandlerImpl implements InteractionHandler {
 
         if (this.currentRectangle) {
             this.currentRectangle.stroke({ width: this.effectiveStrokeWidth });
-            this.currentRectangle.opacity(this.effectiveShapeOpacity);
+            const rectangleOpacity = interactionRectangleOpacity(
+                this.settings.transparentBoxFill,
+                this.effectiveShapeOpacity,
+            );
+            if (rectangleOpacity === null) {
+                this.currentRectangle.fill('none');
+                this.currentRectangle.attr({
+                    style: TRANSPARENT_INTERACTION_RECT_FILL_STYLE,
+                    'fill-opacity': 0,
+                    'stroke-opacity': 1,
+                });
+                this.currentRectangle.opacity(1);
+            } else {
+                this.currentRectangle.opacity(rectangleOpacity);
+            }
         }
 
         this.allPrompts.forEach((shape) => {
             shape.stroke({ width: this.effectiveStrokeWidth });
             if (shape instanceof SVG.Rect) {
-                shape.opacity(this.effectiveShapeOpacity);
+                const rectangleOpacity = interactionRectangleOpacity(
+                    this.settings.transparentBoxFill,
+                    this.effectiveShapeOpacity,
+                );
+                if (rectangleOpacity === null) {
+                    shape.fill('none');
+                    shape.attr({
+                        style: TRANSPARENT_INTERACTION_RECT_FILL_STYLE,
+                        'fill-opacity': 0,
+                        'stroke-opacity': 1,
+                    });
+                    shape.opacity(1);
+                } else {
+                    shape.opacity(rectangleOpacity);
+                }
             } else if (shape instanceof SVG.Circle) {
                 shape.attr('r', this.effectivePointSize);
             }
@@ -539,10 +595,7 @@ export class InteractionHandlerImpl implements InteractionHandler {
 
     public interact(interactData: InteractionData): void {
         if (Object.prototype.hasOwnProperty.call(interactData, 'settings')) {
-            this.settings = {
-                ...this.settings,
-                ...interactData.settings,
-            };
+            this.settings = mergeInteractionSettings(this.settings, interactData.settings);
         }
 
         if (interactData.enabled) {

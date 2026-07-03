@@ -138,6 +138,7 @@ export interface InteractionData {
         points_type?: 'any' | 'positive' | 'negative'; // default is any
         removalStrategy?: 'any' | 'last'; // default is any
         appendCursorPositionAsPoint?: boolean; // default is false
+        transparentBoxFill?: boolean; // default is false; SAM3 seed box only
     };
 }
 

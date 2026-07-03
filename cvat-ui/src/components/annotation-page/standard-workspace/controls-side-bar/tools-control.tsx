@@ -62,6 +62,10 @@ import {
     shouldConfirmAutoTrackLoss,
     validateAutoTrackCandidate,
 } from './auto_track_ball_validation';
+import {
+    buildTrackerSeedInteractionSettings,
+    resolveSam3AutoTrackTerminalAction,
+} from './sam3_auto_track_terminal';
 import { autoTrackDiagnostics, boxGeometryFromPoints } from 'utils/auto-track-diagnostics';
 import {
     createAutoTrackRequestId,
@@ -693,7 +697,10 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         this.autoTrackSessionActive = autoTrack;
         this.suppressNextTrackingCancel = false;
         this.setState({ mode: 'tracking', autoTrackActive: autoTrack });
-        const parameters = { command: 'draw_box' as const, settings: { crosshair: true } };
+        const parameters = {
+            command: 'draw_box' as const,
+            settings: buildTrackerSeedInteractionSettings(activeTracker.id),
+        };
         canvasInstance.interact({ enabled: true, ...parameters });
         onInteractionStart(activeTracker, activeLabelID, parameters);
         onSwitchToolsBlockerState({ buttonVisible: false });
@@ -1116,6 +1123,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         } = this.props;
         const { trackedShapes } = this.state;
         let shouldAutoAdvance = false;
+        let autoTrackTerminalComplete = false;
         const lostClientIDs: number[] = [];
 
         let withServerRequest = false;
@@ -1309,11 +1317,13 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                             break;
                         }
 
-                        if (response.tracking_status === 'preload_exhausted') {
+                        const terminalAction = resolveSam3AutoTrackTerminalAction(tracker.id, response);
+                        if (terminalAction.kind === 'terminal_complete') {
+                            autoTrackTerminalComplete = true;
                             if (this.autoTrackSessionActive && autoTrackDiagnostics.isEnabled()) {
                                 autoTrackDiagnostics.endSession(
                                     'session_complete',
-                                    response.tracking_stop_reason || 'preload_exhausted',
+                                    terminalAction.stopReason,
                                 );
                             }
                             this.stopAutoTrackSession();
@@ -1413,7 +1423,8 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                     });
                 } else if (
                     this.autoTrackSessionActive &&
-                    this.isAutoTrackSessionCurrent(autoTrackSessionId)
+                    this.isAutoTrackSessionCurrent(autoTrackSessionId) &&
+                    !autoTrackTerminalComplete
                 ) {
                     shouldAutoAdvance = true;
                 }
