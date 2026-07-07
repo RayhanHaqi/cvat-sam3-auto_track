@@ -123,6 +123,13 @@ def handler(context, event):
             stage["samSessionCount"] = len(context.user_data.model._sessions)
 
         response_body = {"shapes": out_shapes, "states": out_states}
+        if (
+            out_states
+            and isinstance(out_states[0], dict)
+            and out_states[0].get("lost") is True
+            and (not out_shapes or out_shapes[0] is None)
+        ):
+            response_body["lost"] = True
         log_event(
             "sam_handler_end",
             diagMeta=diag_meta,

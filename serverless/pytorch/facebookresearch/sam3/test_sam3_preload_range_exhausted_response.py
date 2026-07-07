@@ -37,7 +37,11 @@ def _load_main_module():
 class _FakeContext:
     def __init__(self, model):
         self.user_data = SimpleNamespace(model=model)
-        self.logger = SimpleNamespace(info=lambda *_a, **_k: None, warn=lambda *_a, **_k: None)
+        self.logger = SimpleNamespace(
+            info=lambda *_a, **_k: None,
+            warn=lambda *_a, **_k: None,
+            error=lambda *_a, **_k: None,
+        )
 
     class Response:
         def __init__(self, body, headers, content_type, status_code):
@@ -109,3 +113,43 @@ def test_validation_error_still_returns_http_400():
     payload = json.loads(response.body)
     assert "error" in payload
     assert "tracking_status" not in payload
+
+
+def test_handler_emits_top_level_lost_when_state_lost_and_null_shape():
+    main = _load_main_module()
+
+    class _Model:
+        _sessions = {}
+
+        def infer_batch(self, *_args, **_kwargs):
+            return [None], [{"lost": True, "last_bbox": None, "session_key": "k"}]
+
+    context = _FakeContext(_Model())
+    event = SimpleNamespace(
+        body={
+            "frame_index": 5,
+            "states": [{"session_key": "k", "base_frame": 0, "preloaded_count": 96}],
+        }
+    )
+    response = main.handler(context, event)
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload.get("lost") is True
+    assert payload["states"][0]["lost"] is True
+    assert payload["shapes"] == [None]
+
+
+def test_handler_does_not_emit_top_level_lost_without_state_lost():
+    main = _load_main_module()
+
+    class _Model:
+        _sessions = {}
+
+        def infer_batch(self, *_args, **_kwargs):
+            return [[10.0, 10.0, 30.0, 30.0]], [{"last_bbox": [10.0, 10.0, 30.0, 30.0]}]
+
+    context = _FakeContext(_Model())
+    event = SimpleNamespace(body={"frame_index": 1, "states": [{}]})
+    response = main.handler(context, event)
+    payload = json.loads(response.body)
+    assert "lost" not in payload

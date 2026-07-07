@@ -32,9 +32,9 @@ spec:
     - name: SAM3_OUTPUT_PROB_THRESH
       value: "0.3"
     - name: SAM3_IR_REFINE
-      value: "0"
+      value: "1"
     - name: SAM3_IR_STOP_ON_MISSING
-      value: "0"
+      value: "1"
 
   build:
     image: cvat.meta.sam3.tracker:v4-gpu

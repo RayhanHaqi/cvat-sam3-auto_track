@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 _HANDLER_PATH = Path(__file__).resolve().parent / "model_handler.py"
 _spec = importlib.util.spec_from_file_location("sam3_model_handler_policy", _HANDLER_PATH)
@@ -44,6 +45,25 @@ def test_load_sam3_config_accepts_adaptive_component_square_box():
     assert cfg.output_policy == "adaptive_component_square_box"
 
 
+def test_load_sam3_config_accepts_adaptive_component_deadband_box():
+    cfg = load_sam3_config({"SAM3_OUTPUT_POLICY": "adaptive_component_deadband_box"})
+    assert cfg.output_policy == "adaptive_component_deadband_box"
+    assert cfg.adaptive_padding_factor == 1.10
+    assert cfg.adaptive_deadband_ratio == 0.15
+    assert cfg.adaptive_expansion_only is True
+
+
+def test_load_sam3_config_accepts_adaptive_component_latent_prior_box():
+    cfg = load_sam3_config({"SAM3_OUTPUT_POLICY": "adaptive_component_latent_prior_box"})
+    assert cfg.output_policy == "adaptive_component_latent_prior_box"
+    assert cfg.adaptive_padding_factor == pytest.approx(1.10)
+    assert cfg.adaptive_deadband_ratio == pytest.approx(0.15)
+    assert cfg.adaptive_expansion_only is True
+    assert cfg.adaptive_selection_prior_max_age_frames == 20
+    assert cfg.adaptive_emission_hold_max_age_frames == 4
+    assert cfg.adaptive_growth_confirmations == 2
+
+
 def test_build_add_prompt_request_box_mode():
     cfg = Sam3Config(prompt_mode="box")
     req = build_add_prompt_request(
@@ -52,7 +72,7 @@ def test_build_add_prompt_request_box_mode():
     assert req["type"] == "add_prompt"
     assert "bounding_boxes" in req
     assert "text" not in req
-    assert req["output_prob_thresh"] == 0.3
+    assert req["output_prob_thresh"] == 0.25
 
 
 def test_build_add_prompt_request_text_box_mode():

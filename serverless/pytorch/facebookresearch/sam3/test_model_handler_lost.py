@@ -158,3 +158,110 @@ def test_refine_stop_on_missing_returns_none_without_support():
     sam_bbox = [90.0, 90.0, 110.0, 110.0]
     assert refine_bbox_with_ir_intensity(image, sam_bbox, stop_on_missing=True) is None
     assert refine_bbox_with_ir_intensity(image, sam_bbox, stop_on_missing=False) == sam_bbox
+
+
+def test_postprocess_non_init_loss_when_ir_missing_support_on_temporal_jump():
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(
+        ir_refine_enabled=True,
+        ir_stop_on_missing=True,
+        output_policy="mask_bbox",
+    )
+    handler._output_to_bbox = ModelHandler._output_to_bbox.__get__(handler, ModelHandler)
+    image = np.full((200, 200, 3), 20, dtype=np.uint8)
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[90:110, 90:110] = True
+    sess = {"image_height": 200, "image_width": 200}
+    bbox, lost, *_ = handler._postprocess_frame_outputs(
+        sess,
+        image,
+        {"out_binary_masks": [mask]},
+        is_init_frame=False,
+        prompt_bbox=[10.0, 10.0, 30.0, 30.0],
+        last_known_bbox=[12.0, 12.0, 32.0, 32.0],
+        prev_lost=False,
+    )
+    assert bbox is None
+    assert lost is True
+
+
+def test_postprocess_non_init_keeps_sam_bbox_on_consistent_motion_without_ir_support():
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(
+        ir_refine_enabled=True,
+        ir_stop_on_missing=True,
+        output_policy="mask_bbox",
+    )
+    handler._output_to_bbox = ModelHandler._output_to_bbox.__get__(handler, ModelHandler)
+    image = np.full((200, 200, 3), 20, dtype=np.uint8)
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[94:106, 94:106] = True
+    last_known = [90.0, 90.0, 110.0, 110.0]
+    sess = {"image_height": 200, "image_width": 200}
+    bbox, lost, *_ = handler._postprocess_frame_outputs(
+        sess,
+        image,
+        {"out_binary_masks": [mask]},
+        is_init_frame=False,
+        prompt_bbox=[10.0, 10.0, 30.0, 30.0],
+        last_known_bbox=last_known,
+        prev_lost=False,
+    )
+    assert lost is False
+    assert bbox is not None
+
+
+def test_postprocess_init_does_not_fail_closed_when_ir_missing_support():
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(
+        ir_refine_enabled=True,
+        ir_stop_on_missing=True,
+        output_policy="mask_bbox",
+    )
+    handler._output_to_bbox = ModelHandler._output_to_bbox.__get__(handler, ModelHandler)
+    image = np.full((200, 200, 3), 20, dtype=np.uint8)
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[90:110, 90:110] = True
+    seed = [10.0, 10.0, 30.0, 30.0]
+    sess = {"image_height": 200, "image_width": 200}
+    bbox, lost, *_ = handler._postprocess_frame_outputs(
+        sess,
+        image,
+        {"out_binary_masks": [mask]},
+        is_init_frame=True,
+        prompt_bbox=seed,
+        last_known_bbox=seed,
+        prev_lost=False,
+    )
+    assert lost is False
+    assert bbox is not None
+
+
+def test_postprocess_valid_ir_supported_ball_remains_valid():
+    import cv2
+
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(
+        ir_refine_enabled=True,
+        ir_stop_on_missing=True,
+        output_policy="mask_bbox",
+    )
+    handler._output_to_bbox = ModelHandler._output_to_bbox.__get__(handler, ModelHandler)
+    image = np.full((200, 200, 3), 20, dtype=np.uint8)
+    cv2.circle(image, (100, 100), radius=6, color=(255, 255, 255), thickness=-1)
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[94:106, 94:106] = True
+    last_known = [90.0, 90.0, 110.0, 110.0]
+    sess = {"image_height": 200, "image_width": 200}
+    bbox, lost, *_ = handler._postprocess_frame_outputs(
+        sess,
+        image,
+        {"out_binary_masks": [mask]},
+        is_init_frame=False,
+        prompt_bbox=[10.0, 10.0, 30.0, 30.0],
+        last_known_bbox=last_known,
+        prev_lost=False,
+    )
+    assert lost is False
+    assert bbox is not None
+    assert len(bbox) == 4

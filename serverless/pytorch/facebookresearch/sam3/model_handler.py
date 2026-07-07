@@ -23,9 +23,24 @@ VALID_OUTPUT_POLICIES = (
     "mask_bbox",
     "mask_center_box",
     "adaptive_component_square_box",
+    "adaptive_component_deadband_box",
+    "adaptive_component_latent_prior_box",
 )
+ADAPTIVE_COMPONENT_POLICIES = frozenset({
+    "adaptive_component_square_box",
+    "adaptive_component_deadband_box",
+    "adaptive_component_latent_prior_box",
+})
 # Experimental calibration defaults for adaptive_component_square_box (v1).
 ADAPTIVE_PADDING_FACTOR = 1.25
+# Experimental calibration defaults for adaptive_component_deadband_box (v1).
+ADAPTIVE_DEADBAND_PADDING_FACTOR = 1.10
+ADAPTIVE_DEADBAND_RATIO = 0.15
+ADAPTIVE_EXPANSION_ONLY_DEFAULT = True
+# Experimental calibration defaults for adaptive_component_latent_prior_box (v1).
+LATENT_PRIOR_SELECTION_PRIOR_MAX_AGE_FRAMES = 20
+LATENT_PRIOR_EMISSION_HOLD_MAX_AGE_FRAMES = 4
+LATENT_PRIOR_GROWTH_CONFIRMATIONS = 2
 ADAPTIVE_ROI_SCALE = 2.5
 ADAPTIVE_MIN_ROI_MARGIN_PX = 24
 ADAPTIVE_MIN_SIDE_PX = 4
@@ -61,6 +76,11 @@ class Sam3Config:
     adaptive_min_side_px: int = ADAPTIVE_MIN_SIDE_PX
     adaptive_max_growth_ratio: float = ADAPTIVE_MAX_GROWTH_RATIO
     adaptive_max_shrink_ratio: float = ADAPTIVE_MAX_SHRINK_RATIO
+    adaptive_deadband_ratio: float = ADAPTIVE_DEADBAND_RATIO
+    adaptive_expansion_only: bool = ADAPTIVE_EXPANSION_ONLY_DEFAULT
+    adaptive_selection_prior_max_age_frames: int = LATENT_PRIOR_SELECTION_PRIOR_MAX_AGE_FRAMES
+    adaptive_emission_hold_max_age_frames: int = LATENT_PRIOR_EMISSION_HOLD_MAX_AGE_FRAMES
+    adaptive_growth_confirmations: int = LATENT_PRIOR_GROWTH_CONFIRMATIONS
 
 
 def parse_bool_env(value, default=False):
@@ -102,6 +122,14 @@ def load_sam3_config(environ=None):
         except ValueError:
             return default
 
+    padding_default = (
+        ADAPTIVE_DEADBAND_PADDING_FACTOR
+        if policy in (
+            "adaptive_component_deadband_box",
+            "adaptive_component_latent_prior_box",
+        )
+        else ADAPTIVE_PADDING_FACTOR
+    )
     return Sam3Config(
         prompt_mode=mode,
         text_prompt=text_prompt,
@@ -109,7 +137,7 @@ def load_sam3_config(environ=None):
         output_prob_thresh=prob_thresh,
         ir_refine_enabled=ir_refine_enabled,
         ir_stop_on_missing=ir_stop_on_missing,
-        adaptive_padding_factor=_float_env("SAM3_ADAPTIVE_PADDING_FACTOR", ADAPTIVE_PADDING_FACTOR),
+        adaptive_padding_factor=_float_env("SAM3_ADAPTIVE_PADDING_FACTOR", padding_default),
         adaptive_roi_scale=_float_env("SAM3_ADAPTIVE_ROI_SCALE", ADAPTIVE_ROI_SCALE),
         adaptive_min_roi_margin_px=_int_env(
             "SAM3_ADAPTIVE_MIN_ROI_MARGIN_PX", ADAPTIVE_MIN_ROI_MARGIN_PX
@@ -120,6 +148,25 @@ def load_sam3_config(environ=None):
         ),
         adaptive_max_shrink_ratio=_float_env(
             "SAM3_ADAPTIVE_MAX_SHRINK_RATIO", ADAPTIVE_MAX_SHRINK_RATIO
+        ),
+        adaptive_deadband_ratio=_float_env(
+            "SAM3_ADAPTIVE_DEADBAND_RATIO", ADAPTIVE_DEADBAND_RATIO
+        ),
+        adaptive_expansion_only=parse_bool_env(
+            env.get("SAM3_ADAPTIVE_EXPANSION_ONLY"),
+            ADAPTIVE_EXPANSION_ONLY_DEFAULT,
+        ),
+        adaptive_selection_prior_max_age_frames=_int_env(
+            "SAM3_ADAPTIVE_SELECTION_PRIOR_MAX_AGE_FRAMES",
+            LATENT_PRIOR_SELECTION_PRIOR_MAX_AGE_FRAMES,
+        ),
+        adaptive_emission_hold_max_age_frames=_int_env(
+            "SAM3_ADAPTIVE_EMISSION_HOLD_MAX_AGE_FRAMES",
+            LATENT_PRIOR_EMISSION_HOLD_MAX_AGE_FRAMES,
+        ),
+        adaptive_growth_confirmations=_int_env(
+            "SAM3_ADAPTIVE_GROWTH_CONFIRMATIONS",
+            LATENT_PRIOR_GROWTH_CONFIRMATIONS,
         ),
     )
 
@@ -551,7 +598,7 @@ def _component_global_bbox(component_mask, roi_x1, roi_y1):
     ]
 
 
-def _score_adaptive_scale_component(
+def _evaluate_adaptive_scale_component(
     component_mask,
     roi_x1,
     roi_y1,
@@ -582,6 +629,8 @@ def _score_adaptive_scale_component(
         displacement = ((comp_cx - center_x) ** 2 + (comp_cy - center_y) ** 2) ** 0.5
         if displacement > max_disp:
             return None
+    else:
+        displacement = ((comp_cx - center_x) ** 2 + (comp_cy - center_y) ** 2) ** 0.5
 
     shape = _contour_shape_metrics(component_mask)
     if shape is None:
@@ -603,14 +652,56 @@ def _score_adaptive_scale_component(
     if previous_bbox is not None and ref_area > 0:
         overlap_ratio = _bbox_overlap_area(comp_bbox, previous_bbox) / ref_area
 
-    displacement = ((comp_cx - center_x) ** 2 + (comp_cy - center_y) ** 2) ** 0.5
     score = displacement - circularity * 10.0 - overlap_ratio * 20.0
     comp_w = comp_bbox[2] - comp_bbox[0]
     comp_h = comp_bbox[3] - comp_bbox[1]
-    return score, area, comp_w, comp_h
+    return {
+        "score": score,
+        "area": area,
+        "comp_w": comp_w,
+        "comp_h": comp_h,
+        "displacement": displacement,
+        "circularity": circularity,
+        "aspect_ratio": aspect_ratio,
+        "overlap_ratio": overlap_ratio,
+    }
 
 
-def select_adaptive_scale_component(
+def _score_adaptive_scale_component(
+    component_mask,
+    roi_x1,
+    roi_y1,
+    center_x,
+    center_y,
+    box_w,
+    box_h,
+    ref_area,
+    previous_bbox,
+    max_disp,
+):
+    evaluated = _evaluate_adaptive_scale_component(
+        component_mask,
+        roi_x1,
+        roi_y1,
+        center_x,
+        center_y,
+        box_w,
+        box_h,
+        ref_area,
+        previous_bbox,
+        max_disp,
+    )
+    if evaluated is None:
+        return None
+    return (
+        evaluated["score"],
+        evaluated["area"],
+        evaluated["comp_w"],
+        evaluated["comp_h"],
+    )
+
+
+def _collect_adaptive_scale_candidates(
     image,
     center_x,
     center_y,
@@ -618,7 +709,6 @@ def select_adaptive_scale_component(
     previous_bbox,
     config,
 ):
-    """Select a bright support component for scale estimation only (center fixed)."""
     image_height, image_width = image.shape[:2]
     gray = image_to_grayscale(image)
     box_w = max(float(reference_side), config.adaptive_min_side_px)
@@ -634,13 +724,13 @@ def select_adaptive_scale_component(
 
     roi = gray[roi_y1:roi_y2, roi_x1:roi_x2]
     if roi.size == 0:
-        return None
+        return []
 
     threshold = float(np.percentile(roi, IR_REFINE_BRIGHT_PERCENTILE))
     background = float(np.median(roi))
     bright_threshold = max(threshold, background + 15.0)
     if bright_threshold >= float(roi.max()):
-        return None
+        return []
 
     support_threshold = min(
         bright_threshold - 1.0,
@@ -655,7 +745,7 @@ def select_adaptive_scale_component(
         connectivity=8,
     )
     if num_bright <= 1:
-        return None
+        return []
 
     support_binary = (roi >= support_threshold).astype(np.uint8)
     num_support, support_labels, _support_stats, _support_centroids = cv2.connectedComponentsWithStats(
@@ -663,7 +753,7 @@ def select_adaptive_scale_component(
         connectivity=8,
     )
     if num_support <= 1:
-        return None
+        return []
 
     max_disp = min(box_w, box_h) * IR_REFINE_MAX_DISP_RATIO
     candidates = []
@@ -682,7 +772,7 @@ def select_adaptive_scale_component(
             if support_label_id in seen_support_labels:
                 continue
             support_mask = support_labels == support_label_id
-            scored = _score_adaptive_scale_component(
+            evaluated = _evaluate_adaptive_scale_component(
                 support_mask,
                 roi_x1,
                 roi_y1,
@@ -694,20 +784,77 @@ def select_adaptive_scale_component(
                 previous_bbox,
                 max_disp,
             )
-            if scored is None:
+            if evaluated is None:
                 continue
             seen_support_labels.add(support_label_id)
-            candidates.append(scored)
+            candidates.append(evaluated)
 
+    return candidates
+
+
+def select_adaptive_scale_component(
+    image,
+    center_x,
+    center_y,
+    reference_side,
+    previous_bbox,
+    config,
+):
+    """Select a bright support component for scale estimation only (center fixed)."""
+    candidates = _collect_adaptive_scale_candidates(
+        image,
+        center_x,
+        center_y,
+        reference_side,
+        previous_bbox,
+        config,
+    )
     if not candidates:
         return None
 
-    _score, area, comp_w, comp_h = min(candidates, key=lambda item: item[0])
+    best = min(candidates, key=lambda item: item["score"])
     return {
-        "component_area": area,
-        "component_bbox_width": comp_w,
-        "component_bbox_height": comp_h,
-        "equivalent_diameter": equivalent_diameter_from_area(area),
+        "component_area": best["area"],
+        "component_bbox_width": best["comp_w"],
+        "component_bbox_height": best["comp_h"],
+        "equivalent_diameter": equivalent_diameter_from_area(best["area"]),
+    }
+
+
+def select_adaptive_scale_component_with_diagnostics(
+    image,
+    center_x,
+    center_y,
+    reference_side,
+    previous_bbox,
+    config,
+):
+    candidates = _collect_adaptive_scale_candidates(
+        image,
+        center_x,
+        center_y,
+        reference_side,
+        previous_bbox,
+        config,
+    )
+    if not candidates:
+        return None
+
+    ranked = sorted(candidates, key=lambda item: item["score"])
+    best = ranked[0]
+    score_margin = None
+    if len(ranked) >= 2:
+        score_margin = ranked[1]["score"] - ranked[0]["score"]
+    return {
+        "component_area": best["area"],
+        "component_bbox_width": best["comp_w"],
+        "component_bbox_height": best["comp_h"],
+        "equivalent_diameter": equivalent_diameter_from_area(best["area"]),
+        "component_distance": best["displacement"],
+        "component_circularity": best["circularity"],
+        "component_aspect_ratio": best["aspect_ratio"],
+        "component_overlap": best["overlap_ratio"],
+        "score_margin": score_margin,
     }
 
 
@@ -717,6 +864,44 @@ def gate_adaptive_side(padded_side, reference_side, config):
     lo = reference_side * config.adaptive_max_shrink_ratio
     hi = reference_side * config.adaptive_max_growth_ratio
     return max(lo, min(hi, padded_side))
+
+
+def _relative_side_delta(candidate_side, reference_side):
+    reference_side = float(reference_side)
+    if reference_side <= 0:
+        return None
+    return (float(candidate_side) - reference_side) / reference_side
+
+
+def _is_meaningful_growth(gated_side, canonical_side, deadband_ratio):
+    if gated_side <= canonical_side:
+        return False
+    delta = _relative_side_delta(gated_side, canonical_side)
+    return delta is not None and delta > deadband_ratio
+
+
+def _bound_emission_side(side, canonical_side, config):
+    return gate_adaptive_side(side, canonical_side, config)
+
+
+def _default_latent_prior_state(canonical_reference_side):
+    return {
+        "selection_prior_side": canonical_reference_side,
+        "selection_prior_age": 0,
+        "growth_confirmation_count": 0,
+        "emission_prior_side": None,
+        "emission_hold_age": 0,
+    }
+
+
+def _latent_prior_state_from_diag(diag):
+    return {
+        "selection_prior_side": diag.get("selection_prior_side_after"),
+        "selection_prior_age": diag.get("selection_prior_age", 0),
+        "growth_confirmation_count": diag.get("growth_confirmation_count", 0),
+        "emission_prior_side": diag.get("emission_prior_side_after"),
+        "emission_hold_age": diag.get("emission_hold_age", 0),
+    }
 
 
 def apply_adaptive_component_square_box(
@@ -823,6 +1008,410 @@ def apply_adaptive_component_square_box(
     return target["visible_clipped_bbox"], diag
 
 
+def apply_adaptive_component_deadband_box(
+    image,
+    center_bbox,
+    prompt_bbox,
+    previous_bbox,
+    is_init_frame,
+    config,
+    *,
+    previous_accepted_target_side=None,
+):
+    """Preserve canonical center; adapt side only when evidence clears deadband gates."""
+    center_x, center_y = bbox_center(center_bbox)
+    image_height, image_width = image.shape[:2]
+    seed_side = bbox_side_length(prompt_bbox) if prompt_bbox is not None else None
+    canonical_reference_side = bbox_side_length(center_bbox)
+    reference_side = previous_accepted_target_side
+    if reference_side is None and not is_init_frame:
+        reference_side = seed_side
+    if reference_side is None:
+        reference_side = seed_side
+    if reference_side is None:
+        reference_side = config.adaptive_min_side_px
+
+    component = select_adaptive_scale_component_with_diagnostics(
+        image,
+        center_x,
+        center_y,
+        reference_side,
+        previous_bbox,
+        config,
+    )
+
+    component_valid = component is not None
+    fallback_reason = None
+    raw_component_side = None
+    raw_candidate_side = None
+    candidate_side = None
+    gated_candidate_side = None
+    relative_side_delta = None
+    final_relative_side_delta = None
+    deadband_blocked = False
+    expansion_only_blocked = False
+    temporal_gate_changed = False
+    temporal_gate_blocked = False
+    adaptive_emitted = False
+    edge_clipped = False
+    gated_side = None
+    prev_before = previous_accepted_target_side
+    gate_reference_side = prev_before
+    if gate_reference_side is None and not is_init_frame:
+        gate_reference_side = seed_side
+    if gate_reference_side is None:
+        gate_reference_side = seed_side
+    if gate_reference_side is None:
+        gate_reference_side = config.adaptive_min_side_px
+
+    if not component_valid:
+        fallback_reason = "no_valid_component"
+        emitted_bbox = list(center_bbox)
+        accepted_target_side = canonical_reference_side
+    else:
+        raw_component_side = median_component_side(
+            component["component_bbox_width"],
+            component["component_bbox_height"],
+            component["component_area"],
+        )
+        raw_candidate_side = raw_component_side * config.adaptive_padding_factor
+        candidate_side = raw_candidate_side
+        gated_candidate_side = gate_adaptive_side(
+            raw_candidate_side,
+            gate_reference_side,
+            config,
+        )
+        gated_side = gated_candidate_side
+        temporal_gate_changed = abs(gated_candidate_side - raw_candidate_side) > 1e-6
+
+        if canonical_reference_side > 0:
+            relative_side_delta = (
+                (raw_candidate_side - canonical_reference_side) / canonical_reference_side
+            )
+            final_relative_side_delta = (
+                (gated_candidate_side - canonical_reference_side) / canonical_reference_side
+            )
+
+        raw_passes_expansion_only = (
+            not config.adaptive_expansion_only
+            or raw_candidate_side > canonical_reference_side
+        )
+        raw_passes_deadband = (
+            canonical_reference_side <= 0
+            or (
+                (raw_candidate_side - canonical_reference_side) / canonical_reference_side
+            ) > config.adaptive_deadband_ratio
+        )
+
+        emit_canonical = False
+        if config.adaptive_expansion_only and gated_candidate_side <= canonical_reference_side:
+            expansion_only_blocked = True
+            emit_canonical = True
+            if temporal_gate_changed and raw_passes_expansion_only:
+                temporal_gate_blocked = True
+                fallback_reason = "temporal_gate_expansion_only"
+            else:
+                fallback_reason = "expansion_only"
+        elif canonical_reference_side > 0 and final_relative_side_delta <= config.adaptive_deadband_ratio:
+            deadband_blocked = True
+            emit_canonical = True
+            if temporal_gate_changed and raw_passes_deadband:
+                temporal_gate_blocked = True
+                fallback_reason = "temporal_gate_deadband"
+            else:
+                fallback_reason = "deadband"
+
+        if emit_canonical:
+            emitted_bbox = list(center_bbox)
+            accepted_target_side = canonical_reference_side
+        else:
+            target = build_adaptive_square_target(
+                center_x,
+                center_y,
+                gated_candidate_side,
+                image_height,
+                image_width,
+            )
+            emitted_bbox = target["visible_clipped_bbox"]
+            edge_clipped = target["edge_clipped"]
+            accepted_target_side = gated_candidate_side
+            adaptive_emitted = True
+
+    diag = {
+        "policy": "adaptive_component_deadband_box",
+        "canonical_tracking_bbox": list(center_bbox),
+        "canonical_reference_side": canonical_reference_side,
+        "candidate_side": candidate_side,
+        "raw_candidate_side": raw_candidate_side,
+        "gated_candidate_side": gated_candidate_side,
+        "relative_side_delta": relative_side_delta,
+        "final_relative_side_delta": final_relative_side_delta,
+        "component_valid": component_valid,
+        "deadband_blocked": deadband_blocked,
+        "expansion_only_blocked": expansion_only_blocked,
+        "temporal_gate_changed": temporal_gate_changed,
+        "temporal_gate_blocked": temporal_gate_blocked,
+        "adaptive_emitted": adaptive_emitted,
+        "previous_accepted_target_side_before": prev_before,
+        "previous_accepted_target_side_after": accepted_target_side,
+        "accepted_target_side": accepted_target_side,
+        "score_margin": component.get("score_margin") if component else None,
+        "component_distance": component.get("component_distance") if component else None,
+        "component_overlap": component.get("component_overlap") if component else None,
+        "component_circularity": component.get("component_circularity") if component else None,
+        "component_aspect_ratio": component.get("component_aspect_ratio") if component else None,
+        "component_area": component.get("component_area") if component else None,
+        "component_bbox_width": component.get("component_bbox_width") if component else None,
+        "component_bbox_height": component.get("component_bbox_height") if component else None,
+        "equivalent_diameter": component.get("equivalent_diameter") if component else None,
+        "raw_component_side": raw_component_side,
+        "padded_side": raw_candidate_side,
+        "gated_side": gated_side,
+        "fallback_reason": fallback_reason,
+        "lost": False,
+        "edge_clipped": edge_clipped,
+        "requested_center_x": center_x,
+        "requested_center_y": center_y,
+        "center_x": center_x,
+        "center_y": center_y,
+        "seed_side": seed_side,
+        "previous_side": previous_accepted_target_side,
+        "previous_accepted_target_side": prev_before,
+    }
+
+    return emitted_bbox, diag
+
+
+def apply_adaptive_component_latent_prior_box(
+    image,
+    center_bbox,
+    prompt_bbox,
+    previous_bbox,
+    is_init_frame,
+    config,
+    *,
+    latent_prior_state=None,
+):
+    """Preserve canonical center; use bounded latent priors for selection and optional hold."""
+    center_x, center_y = bbox_center(center_bbox)
+    image_height, image_width = image.shape[:2]
+    canonical_reference_side = bbox_side_length(center_bbox)
+    state = latent_prior_state if latent_prior_state is not None else {}
+    selection_prior_side_before = state.get("selection_prior_side")
+    if selection_prior_side_before is None:
+        selection_prior_side_before = canonical_reference_side
+    selection_prior_age_before = int(state.get("selection_prior_age", 0))
+    growth_confirmation_count_before = int(state.get("growth_confirmation_count", 0))
+    emission_prior_side_before = state.get("emission_prior_side")
+    emission_hold_age_before = int(state.get("emission_hold_age", 0))
+
+    selection_prior_side = selection_prior_side_before
+    selection_prior_age = selection_prior_age_before
+    growth_confirmation_count = growth_confirmation_count_before
+    emission_prior_side = emission_prior_side_before
+    emission_hold_age = emission_hold_age_before
+    growth_confirmation_reset_reason = None
+    emission_hold_clear_reason = None
+    fallback_reason = None
+    adaptive_emitted = False
+    edge_clipped = False
+    component_valid = False
+    raw_candidate_side = None
+    gated_candidate_side = None
+    relative_side_delta = None
+    emission_hold_active = False
+
+    if selection_prior_age >= config.adaptive_selection_prior_max_age_frames:
+        selection_prior_side = canonical_reference_side
+        selection_prior_age = 0
+        growth_confirmation_count = 0
+        growth_confirmation_reset_reason = "selection_prior_expired"
+        emission_prior_side = None
+        emission_hold_age = 0
+        emission_hold_clear_reason = "selection_prior_expired"
+
+    selection_reference = selection_prior_side
+    component = select_adaptive_scale_component_with_diagnostics(
+        image,
+        center_x,
+        center_y,
+        selection_reference,
+        previous_bbox,
+        config,
+    )
+    component_valid = component is not None
+
+    def _emit_canonical():
+        return list(center_bbox)
+
+    def _emit_adaptive(side):
+        nonlocal edge_clipped, adaptive_emitted
+        target = build_adaptive_square_target(
+            center_x,
+            center_y,
+            side,
+            image_height,
+            image_width,
+        )
+        edge_clipped = target["edge_clipped"]
+        adaptive_emitted = True
+        return target["visible_clipped_bbox"], target["requested_target_side"]
+
+    emitted_bbox = _emit_canonical()
+
+    if component_valid:
+        raw_component_side = median_component_side(
+            component["component_bbox_width"],
+            component["component_bbox_height"],
+            component["component_area"],
+        )
+        raw_candidate_side = raw_component_side * config.adaptive_padding_factor
+        gated_candidate_side = gate_adaptive_side(
+            raw_candidate_side,
+            selection_reference,
+            config,
+        )
+        selection_prior_side = gated_candidate_side
+        selection_prior_age = 0
+        relative_side_delta = _relative_side_delta(
+            gated_candidate_side,
+            canonical_reference_side,
+        )
+        meaningful_growth = _is_meaningful_growth(
+            gated_candidate_side,
+            canonical_reference_side,
+            config.adaptive_deadband_ratio,
+        )
+        shrink_or_equal = raw_candidate_side <= canonical_reference_side
+
+        if shrink_or_equal or not meaningful_growth:
+            if growth_confirmation_count > 0:
+                growth_confirmation_reset_reason = "non_growth_component"
+            growth_confirmation_count = 0
+            if emission_prior_side is not None:
+                emission_hold_clear_reason = "non_growth_component"
+            emission_prior_side = None
+            emission_hold_age = 0
+            emitted_bbox = _emit_canonical()
+            fallback_reason = "non_growth_component"
+        elif meaningful_growth:
+            growth_confirmation_count += 1
+            if growth_confirmation_count >= config.adaptive_growth_confirmations:
+                bounded_side = _bound_emission_side(
+                    gated_candidate_side,
+                    canonical_reference_side,
+                    config,
+                )
+                emission_prior_side = bounded_side
+                emission_hold_age = 0
+                emitted_bbox, held_side = _emit_adaptive(bounded_side)
+                emission_prior_side = held_side
+                fallback_reason = None
+            else:
+                emitted_bbox = _emit_canonical()
+                fallback_reason = "growth_confirmation_pending"
+    else:
+        if growth_confirmation_count > 0:
+            growth_confirmation_reset_reason = "no_valid_component"
+        growth_confirmation_count = 0
+        selection_prior_age = selection_prior_age + 1
+        fallback_reason = "no_valid_component"
+
+        if (
+            emission_prior_side is not None
+            and emission_hold_age_before < config.adaptive_emission_hold_max_age_frames
+        ):
+            bounded_hold_side = _bound_emission_side(
+                emission_prior_side,
+                canonical_reference_side,
+                config,
+            )
+            if _is_meaningful_growth(
+                bounded_hold_side,
+                canonical_reference_side,
+                config.adaptive_deadband_ratio,
+            ):
+                emitted_bbox, held_side = _emit_adaptive(bounded_hold_side)
+                emission_prior_side = held_side
+                emission_hold_age = emission_hold_age_before + 1
+                emission_hold_active = True
+                fallback_reason = "emission_hold"
+            else:
+                emission_prior_side = None
+                emission_hold_age = 0
+                emission_hold_clear_reason = "hold_not_material"
+                emitted_bbox = _emit_canonical()
+        elif emission_prior_side is not None:
+            emission_prior_side = None
+            emission_hold_age = 0
+            emission_hold_clear_reason = "hold_expired"
+            emitted_bbox = _emit_canonical()
+
+        if selection_prior_age >= config.adaptive_selection_prior_max_age_frames:
+            selection_prior_side = canonical_reference_side
+            selection_prior_age = 0
+            growth_confirmation_count = 0
+            if growth_confirmation_reset_reason is None:
+                growth_confirmation_reset_reason = "selection_prior_expired"
+            emission_prior_side = None
+            emission_hold_age = 0
+            emission_hold_active = False
+            emission_hold_clear_reason = "selection_prior_expired"
+            emitted_bbox = _emit_canonical()
+            adaptive_emitted = False
+            fallback_reason = "selection_prior_expired"
+
+    if config.adaptive_expansion_only and component_valid and gated_candidate_side is not None:
+        if gated_candidate_side <= canonical_reference_side and adaptive_emitted:
+            emitted_bbox = _emit_canonical()
+            adaptive_emitted = False
+            if fallback_reason is None:
+                fallback_reason = "expansion_only"
+
+    diag = {
+        "policy": "adaptive_component_latent_prior_box",
+        "canonical_tracking_bbox": list(center_bbox),
+        "canonical_reference_side": canonical_reference_side,
+        "selection_prior_side_before": selection_prior_side_before,
+        "selection_prior_side_after": selection_prior_side,
+        "selection_prior_age": selection_prior_age,
+        "raw_candidate_side": raw_candidate_side,
+        "gated_candidate_side": gated_candidate_side,
+        "component_valid": component_valid,
+        "relative_side_delta": relative_side_delta,
+        "growth_confirmation_count": growth_confirmation_count,
+        "growth_confirmation_reset_reason": growth_confirmation_reset_reason,
+        "emission_prior_side_before": emission_prior_side_before,
+        "emission_prior_side_after": emission_prior_side,
+        "emission_hold_age": emission_hold_age,
+        "emission_hold_active": emission_hold_active,
+        "emission_hold_clear_reason": emission_hold_clear_reason,
+        "adaptive_emitted": adaptive_emitted,
+        "fallback_reason": fallback_reason,
+        "edge_clipped": edge_clipped,
+        "lost": False,
+        "component_area": component.get("component_area") if component else None,
+        "component_bbox_width": component.get("component_bbox_width") if component else None,
+        "component_bbox_height": component.get("component_bbox_height") if component else None,
+        "equivalent_diameter": component.get("equivalent_diameter") if component else None,
+        "raw_component_side": (
+            median_component_side(
+                component["component_bbox_width"],
+                component["component_bbox_height"],
+                component["component_area"],
+            )
+            if component
+            else None
+        ),
+        "requested_center_x": center_x,
+        "requested_center_y": center_y,
+        "center_x": center_x,
+        "center_y": center_y,
+    }
+
+    return emitted_bbox, diag
+
+
 def log_adaptive_scale_diagnostics(diag, *, relative_frame, diag_meta=None):
     if not diag_enabled():
         return
@@ -919,6 +1508,19 @@ def _bboxes_near(a, b, tol=2.0):
     if a is None or b is None:
         return False
     return all(abs(float(a[i]) - float(b[i])) <= tol for i in range(4))
+
+
+def _sam_bbox_temporally_consistent(sam_bbox, previous_bbox):
+    """Reuse IR temporal gate: SAM center must stay within existing max displacement."""
+    if previous_bbox is None or sam_bbox is None:
+        return True
+    box_w = max(float(sam_bbox[2]) - float(sam_bbox[0]), MIN_BOX_SIDE_PX)
+    box_h = max(float(sam_bbox[3]) - float(sam_bbox[1]), MIN_BOX_SIDE_PX)
+    max_temporal_disp = max(box_w, box_h) * IR_REFINE_MAX_TEMPORAL_DISP_RATIO
+    prev_cx, prev_cy = bbox_center(previous_bbox)
+    sam_cx, sam_cy = bbox_center(sam_bbox)
+    temporal_disp = ((sam_cx - prev_cx) ** 2 + (sam_cy - prev_cy) ** 2) ** 0.5
+    return temporal_disp <= max_temporal_disp
 
 
 class ModelHandler:
@@ -1021,11 +1623,22 @@ class ModelHandler:
     def _maybe_refine_bbox(self, image, bbox, previous_bbox=None):
         if not self.config.ir_refine_enabled or bbox is None:
             return bbox
+        if (
+            self.config.ir_stop_on_missing
+            and previous_bbox is not None
+            and not _sam_bbox_temporally_consistent(bbox, previous_bbox)
+        ):
+            return refine_bbox_with_ir_intensity(
+                image,
+                bbox,
+                previous_bbox=previous_bbox,
+                stop_on_missing=True,
+            )
         return refine_bbox_with_ir_intensity(
             image,
             bbox,
             previous_bbox=previous_bbox,
-            stop_on_missing=self.config.ir_stop_on_missing,
+            stop_on_missing=False,
         )
 
     def _build_state(
@@ -1155,12 +1768,13 @@ class ModelHandler:
         relative_frame=None,
         diag_meta=None,
         previous_accepted_target_side=None,
+        latent_prior_state=None,
     ):
         if prev_lost:
             return None, True, None, None
 
         reference_bbox = prompt_bbox if is_init_frame else last_known_bbox
-        if self.config.output_policy == "adaptive_component_square_box":
+        if self.config.output_policy in ADAPTIVE_COMPONENT_POLICIES:
             center_cfg = replace(self.config, output_policy="mask_center_box")
             bbox = select_bbox_from_outputs(
                 outputs,
@@ -1225,6 +1839,52 @@ class ModelHandler:
                     relative_frame=relative_frame,
                     diag_meta=diag_meta,
                 )
+        elif self.config.output_policy == "adaptive_component_deadband_box":
+            emitted_bbox, adaptive_diag = apply_adaptive_component_deadband_box(
+                frame_image,
+                canonical_tracking_bbox,
+                prompt_bbox,
+                None if is_init_frame else last_known_bbox,
+                is_init_frame,
+                self.config,
+                previous_accepted_target_side=previous_accepted_target_side,
+            )
+            if adaptive_diag is not None:
+                can_cx, can_cy = bbox_center(canonical_tracking_bbox)
+                emit_cx, emit_cy = bbox_center(emitted_bbox)
+                adaptive_diag["canonical_center_x"] = can_cx
+                adaptive_diag["canonical_center_y"] = can_cy
+                adaptive_diag["emitted_bbox"] = emitted_bbox
+                adaptive_diag["emitted_center_x"] = emit_cx
+                adaptive_diag["emitted_center_y"] = emit_cy
+                log_adaptive_scale_diagnostics(
+                    adaptive_diag,
+                    relative_frame=relative_frame,
+                    diag_meta=diag_meta,
+                )
+        elif self.config.output_policy == "adaptive_component_latent_prior_box":
+            emitted_bbox, adaptive_diag = apply_adaptive_component_latent_prior_box(
+                frame_image,
+                canonical_tracking_bbox,
+                prompt_bbox,
+                None if is_init_frame else last_known_bbox,
+                is_init_frame,
+                self.config,
+                latent_prior_state=latent_prior_state,
+            )
+            if adaptive_diag is not None:
+                can_cx, can_cy = bbox_center(canonical_tracking_bbox)
+                emit_cx, emit_cy = bbox_center(emitted_bbox)
+                adaptive_diag["canonical_center_x"] = can_cx
+                adaptive_diag["canonical_center_y"] = can_cy
+                adaptive_diag["emitted_bbox"] = emitted_bbox
+                adaptive_diag["emitted_center_x"] = emit_cx
+                adaptive_diag["emitted_center_y"] = emit_cy
+                log_adaptive_scale_diagnostics(
+                    adaptive_diag,
+                    relative_frame=relative_frame,
+                    diag_meta=diag_meta,
+                )
 
         return emitted_bbox, False, adaptive_diag, canonical_tracking_bbox
 
@@ -1246,6 +1906,7 @@ class ModelHandler:
             prev_bbox = None
             prev_lost = False
             prev_accepted_target_side = None
+            prev_latent_prior_state = None
             prompt_bbox = sess["prompt_bbox"]
 
             for relative_frame in range(int(preload_count)):
@@ -1264,6 +1925,7 @@ class ModelHandler:
                         prev_lost=prev_lost,
                         relative_frame=relative_frame,
                         previous_accepted_target_side=prev_accepted_target_side,
+                        latent_prior_state=prev_latent_prior_state,
                     )
                 )
                 cache[relative_frame] = {"bbox": emitted_bbox, "lost": lost}
@@ -1271,11 +1933,17 @@ class ModelHandler:
                     prev_lost = True
                     prev_bbox = None
                     prev_accepted_target_side = None
+                    prev_latent_prior_state = None
                 else:
                     prev_lost = False
                     prev_bbox = canonical_tracking_bbox
-                    if (
-                        self.config.output_policy == "adaptive_component_square_box"
+                    if self.config.output_policy == "adaptive_component_latent_prior_box":
+                        if adaptive_diag is not None:
+                            prev_latent_prior_state = _latent_prior_state_from_diag(
+                                adaptive_diag
+                            )
+                    elif (
+                        self.config.output_policy in ADAPTIVE_COMPONENT_POLICIES
                         and adaptive_diag is not None
                     ):
                         prev_accepted_target_side = adaptive_diag.get("accepted_target_side")
