@@ -39,6 +39,11 @@ def test_load_sam3_config_reads_text_box_experiment():
     assert cfg.output_prob_thresh == 0.45
 
 
+def test_load_sam3_config_accepts_adaptive_component_square_box():
+    cfg = load_sam3_config({"SAM3_OUTPUT_POLICY": "adaptive_component_square_box"})
+    assert cfg.output_policy == "adaptive_component_square_box"
+
+
 def test_build_add_prompt_request_box_mode():
     cfg = Sam3Config(prompt_mode="box")
     req = build_add_prompt_request(

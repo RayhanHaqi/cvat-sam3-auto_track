@@ -1,11 +1,12 @@
 import base64
 import io
+import math
 import os
 import shutil
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -17,7 +18,19 @@ from sam3.model_builder import build_sam3_predictor
 
 MAX_SESSIONS = 32
 VALID_PROMPT_MODES = ("box", "text_box", "text")
-VALID_OUTPUT_POLICIES = ("sam_box", "mask_bbox", "mask_center_box")
+VALID_OUTPUT_POLICIES = (
+    "sam_box",
+    "mask_bbox",
+    "mask_center_box",
+    "adaptive_component_square_box",
+)
+# Experimental calibration defaults for adaptive_component_square_box (v1).
+ADAPTIVE_PADDING_FACTOR = 1.25
+ADAPTIVE_ROI_SCALE = 2.5
+ADAPTIVE_MIN_ROI_MARGIN_PX = 24
+ADAPTIVE_MIN_SIDE_PX = 4
+ADAPTIVE_MAX_GROWTH_RATIO = 1.30
+ADAPTIVE_MAX_SHRINK_RATIO = 0.75
 DEFAULT_TEXT_PROMPT = "ping pong ball"
 DEFAULT_OUTPUT_PROB_THRESH = 0.25
 MIN_BOX_SIDE_PX = 4
@@ -42,6 +55,12 @@ class Sam3Config:
     output_prob_thresh: float = DEFAULT_OUTPUT_PROB_THRESH
     ir_refine_enabled: bool = False
     ir_stop_on_missing: bool = False
+    adaptive_padding_factor: float = ADAPTIVE_PADDING_FACTOR
+    adaptive_roi_scale: float = ADAPTIVE_ROI_SCALE
+    adaptive_min_roi_margin_px: int = ADAPTIVE_MIN_ROI_MARGIN_PX
+    adaptive_min_side_px: int = ADAPTIVE_MIN_SIDE_PX
+    adaptive_max_growth_ratio: float = ADAPTIVE_MAX_GROWTH_RATIO
+    adaptive_max_shrink_ratio: float = ADAPTIVE_MAX_SHRINK_RATIO
 
 
 def parse_bool_env(value, default=False):
@@ -70,6 +89,19 @@ def load_sam3_config(environ=None):
         prob_thresh = DEFAULT_OUTPUT_PROB_THRESH
     ir_refine_enabled = parse_bool_env(env.get("SAM3_IR_REFINE"), False)
     ir_stop_on_missing = parse_bool_env(env.get("SAM3_IR_STOP_ON_MISSING"), False)
+
+    def _float_env(name, default):
+        try:
+            return float(env.get(name, str(default)))
+        except ValueError:
+            return default
+
+    def _int_env(name, default):
+        try:
+            return int(env.get(name, str(default)))
+        except ValueError:
+            return default
+
     return Sam3Config(
         prompt_mode=mode,
         text_prompt=text_prompt,
@@ -77,6 +109,18 @@ def load_sam3_config(environ=None):
         output_prob_thresh=prob_thresh,
         ir_refine_enabled=ir_refine_enabled,
         ir_stop_on_missing=ir_stop_on_missing,
+        adaptive_padding_factor=_float_env("SAM3_ADAPTIVE_PADDING_FACTOR", ADAPTIVE_PADDING_FACTOR),
+        adaptive_roi_scale=_float_env("SAM3_ADAPTIVE_ROI_SCALE", ADAPTIVE_ROI_SCALE),
+        adaptive_min_roi_margin_px=_int_env(
+            "SAM3_ADAPTIVE_MIN_ROI_MARGIN_PX", ADAPTIVE_MIN_ROI_MARGIN_PX
+        ),
+        adaptive_min_side_px=_int_env("SAM3_ADAPTIVE_MIN_SIDE_PX", ADAPTIVE_MIN_SIDE_PX),
+        adaptive_max_growth_ratio=_float_env(
+            "SAM3_ADAPTIVE_MAX_GROWTH_RATIO", ADAPTIVE_MAX_GROWTH_RATIO
+        ),
+        adaptive_max_shrink_ratio=_float_env(
+            "SAM3_ADAPTIVE_MAX_SHRINK_RATIO", ADAPTIVE_MAX_SHRINK_RATIO
+        ),
     )
 
 
@@ -405,6 +449,399 @@ def refine_bbox_with_ir_intensity(image, sam_bbox, previous_bbox=None, stop_on_m
     return recenter_bbox(sam_bbox, best_cx, best_cy, image_height, image_width)
 
 
+def bbox_side_length(bbox):
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    return max(x2 - x1, y2 - y1, MIN_BOX_SIDE_PX)
+
+
+def square_target_bbox_from_center(center_x, center_y, side):
+    """Full square target around center; coordinates may lie outside the image."""
+    half = max(float(side) / 2.0, MIN_BOX_SIDE_PX / 2.0)
+    return [
+        float(center_x) - half,
+        float(center_y) - half,
+        float(center_x) + half,
+        float(center_y) + half,
+    ]
+
+
+def _bbox_edge_clipped(requested_bbox, visible_bbox, tol=1e-6):
+    return any(
+        abs(float(requested_bbox[i]) - float(visible_bbox[i])) > tol for i in range(4)
+    )
+
+
+def build_adaptive_square_target(center_x, center_y, target_side, image_height, image_width):
+    """Build adaptive square target; square before clipping, possibly rectangular after.
+
+    Interior case: visible bbox is square and centered on the requested center.
+    Edge-clipped case: clip the full square target to image bounds without recentering
+    inward to preserve side length.
+    """
+    requested_target_side = max(float(target_side), MIN_BOX_SIDE_PX)
+    requested_target_bbox = square_target_bbox_from_center(
+        center_x,
+        center_y,
+        requested_target_side,
+    )
+    visible_clipped_bbox = _clamp_bbox(
+        requested_target_bbox,
+        image_height,
+        image_width,
+    )
+    edge_clipped = _bbox_edge_clipped(requested_target_bbox, visible_clipped_bbox)
+    return {
+        "requested_target_side": requested_target_side,
+        "requested_target_bbox": requested_target_bbox,
+        "visible_clipped_bbox": visible_clipped_bbox,
+        "edge_clipped": edge_clipped,
+    }
+
+
+def square_bbox_from_center(center_x, center_y, side, image_height, image_width):
+    return build_adaptive_square_target(
+        center_x,
+        center_y,
+        side,
+        image_height,
+        image_width,
+    )["visible_clipped_bbox"]
+
+
+def equivalent_diameter_from_area(area):
+    area = max(float(area), 0.0)
+    return math.sqrt(4.0 * area / math.pi)
+
+
+def median_component_side(bbox_width, bbox_height, component_area):
+    return float(
+        np.median(
+            [
+                float(bbox_width),
+                float(bbox_height),
+                equivalent_diameter_from_area(component_area),
+            ]
+        )
+    )
+
+
+def _bbox_overlap_area(a, b):
+    if a is None or b is None:
+        return 0.0
+    ax1, ay1, ax2, ay2 = [float(v) for v in a]
+    bx1, by1, bx2, by2 = [float(v) for v in b]
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    return (ix2 - ix1) * (iy2 - iy1)
+
+
+def _component_global_bbox(component_mask, roi_x1, roi_y1):
+    ys, xs = np.where(component_mask)
+    if xs.size == 0:
+        return None
+    return [
+        float(xs.min()) + roi_x1,
+        float(ys.min()) + roi_y1,
+        float(xs.max()) + roi_x1,
+        float(ys.max()) + roi_y1,
+    ]
+
+
+def _score_adaptive_scale_component(
+    component_mask,
+    roi_x1,
+    roi_y1,
+    center_x,
+    center_y,
+    box_w,
+    box_h,
+    ref_area,
+    previous_bbox,
+    max_disp,
+):
+    area = float(component_mask.sum())
+    min_area = ref_area * IR_REFINE_MIN_AREA_RATIO
+    max_area = ref_area * IR_REFINE_MAX_AREA_RATIO
+    if area < min_area or area > max_area:
+        return None
+
+    comp_bbox = _component_global_bbox(component_mask, roi_x1, roi_y1)
+    if comp_bbox is None:
+        return None
+    comp_cx = (comp_bbox[0] + comp_bbox[2]) / 2.0
+    comp_cy = (comp_bbox[1] + comp_bbox[3]) / 2.0
+
+    if not (
+        comp_bbox[0] <= center_x <= comp_bbox[2]
+        and comp_bbox[1] <= center_y <= comp_bbox[3]
+    ):
+        displacement = ((comp_cx - center_x) ** 2 + (comp_cy - center_y) ** 2) ** 0.5
+        if displacement > max_disp:
+            return None
+
+    shape = _contour_shape_metrics(component_mask)
+    if shape is None:
+        return None
+    circularity, aspect_ratio = shape
+    if circularity < IR_REFINE_MIN_CIRCULARITY:
+        return None
+    if aspect_ratio > IR_REFINE_MAX_ASPECT_RATIO:
+        return None
+
+    if previous_bbox is not None:
+        prev_cx, prev_cy = bbox_center(previous_bbox)
+        max_temporal_disp = max(box_w, box_h) * IR_REFINE_MAX_TEMPORAL_DISP_RATIO
+        temporal_disp = ((comp_cx - prev_cx) ** 2 + (comp_cy - prev_cy) ** 2) ** 0.5
+        if temporal_disp > max_temporal_disp:
+            return None
+
+    overlap_ratio = 0.0
+    if previous_bbox is not None and ref_area > 0:
+        overlap_ratio = _bbox_overlap_area(comp_bbox, previous_bbox) / ref_area
+
+    displacement = ((comp_cx - center_x) ** 2 + (comp_cy - center_y) ** 2) ** 0.5
+    score = displacement - circularity * 10.0 - overlap_ratio * 20.0
+    comp_w = comp_bbox[2] - comp_bbox[0]
+    comp_h = comp_bbox[3] - comp_bbox[1]
+    return score, area, comp_w, comp_h
+
+
+def select_adaptive_scale_component(
+    image,
+    center_x,
+    center_y,
+    reference_side,
+    previous_bbox,
+    config,
+):
+    """Select a bright support component for scale estimation only (center fixed)."""
+    image_height, image_width = image.shape[:2]
+    gray = image_to_grayscale(image)
+    box_w = max(float(reference_side), config.adaptive_min_side_px)
+    box_h = box_w
+    ref_area = box_w * box_h
+
+    margin_x = max(box_w * config.adaptive_roi_scale, config.adaptive_min_roi_margin_px)
+    margin_y = max(box_h * config.adaptive_roi_scale, config.adaptive_min_roi_margin_px)
+    roi_x1 = int(max(0.0, center_x - margin_x))
+    roi_y1 = int(max(0.0, center_y - margin_y))
+    roi_x2 = int(min(float(image_width), center_x + margin_x))
+    roi_y2 = int(min(float(image_height), center_y + margin_y))
+
+    roi = gray[roi_y1:roi_y2, roi_x1:roi_x2]
+    if roi.size == 0:
+        return None
+
+    threshold = float(np.percentile(roi, IR_REFINE_BRIGHT_PERCENTILE))
+    background = float(np.median(roi))
+    bright_threshold = max(threshold, background + 15.0)
+    if bright_threshold >= float(roi.max()):
+        return None
+
+    support_threshold = min(
+        bright_threshold - 1.0,
+        background + IR_REFINE_SUPPORT_CONTRAST_FLOOR,
+    )
+    if support_threshold <= background:
+        support_threshold = background + 1.0
+
+    bright_binary = (roi >= bright_threshold).astype(np.uint8)
+    num_bright, bright_labels, bright_stats, _bright_centroids = cv2.connectedComponentsWithStats(
+        bright_binary,
+        connectivity=8,
+    )
+    if num_bright <= 1:
+        return None
+
+    support_binary = (roi >= support_threshold).astype(np.uint8)
+    num_support, support_labels, _support_stats, _support_centroids = cv2.connectedComponentsWithStats(
+        support_binary,
+        connectivity=8,
+    )
+    if num_support <= 1:
+        return None
+
+    max_disp = min(box_w, box_h) * IR_REFINE_MAX_DISP_RATIO
+    candidates = []
+    seen_support_labels = set()
+
+    for seed_label_id in range(1, num_bright):
+        seed_area = float(bright_stats[seed_label_id, cv2.CC_STAT_AREA])
+        if seed_area < IR_REFINE_MIN_SEED_PIXELS:
+            continue
+
+        seed_mask = bright_labels == seed_label_id
+        overlapping_support_ids = np.unique(support_labels[seed_mask])
+        overlapping_support_ids = overlapping_support_ids[overlapping_support_ids != 0]
+
+        for support_label_id in overlapping_support_ids:
+            if support_label_id in seen_support_labels:
+                continue
+            support_mask = support_labels == support_label_id
+            scored = _score_adaptive_scale_component(
+                support_mask,
+                roi_x1,
+                roi_y1,
+                center_x,
+                center_y,
+                box_w,
+                box_h,
+                ref_area,
+                previous_bbox,
+                max_disp,
+            )
+            if scored is None:
+                continue
+            seen_support_labels.add(support_label_id)
+            candidates.append(scored)
+
+    if not candidates:
+        return None
+
+    _score, area, comp_w, comp_h = min(candidates, key=lambda item: item[0])
+    return {
+        "component_area": area,
+        "component_bbox_width": comp_w,
+        "component_bbox_height": comp_h,
+        "equivalent_diameter": equivalent_diameter_from_area(area),
+    }
+
+
+def gate_adaptive_side(padded_side, reference_side, config):
+    reference_side = max(float(reference_side), config.adaptive_min_side_px)
+    padded_side = max(float(padded_side), config.adaptive_min_side_px)
+    lo = reference_side * config.adaptive_max_shrink_ratio
+    hi = reference_side * config.adaptive_max_growth_ratio
+    return max(lo, min(hi, padded_side))
+
+
+def apply_adaptive_component_square_box(
+    image,
+    center_bbox,
+    prompt_bbox,
+    previous_bbox,
+    is_init_frame,
+    config,
+    *,
+    previous_accepted_target_side=None,
+):
+    """Preserve SAM/IR center; adapt square side from local IR component.
+
+    adaptive_component_square_box means square before image clipping; the returned
+    visible bbox may be non-square after geometric clipping at image edges.
+    """
+    center_x, center_y = bbox_center(center_bbox)
+    image_height, image_width = image.shape[:2]
+    seed_side = bbox_side_length(prompt_bbox) if prompt_bbox is not None else None
+    reference_side = previous_accepted_target_side
+    if reference_side is None and not is_init_frame:
+        reference_side = seed_side
+    if reference_side is None:
+        reference_side = seed_side
+    if reference_side is None:
+        reference_side = config.adaptive_min_side_px
+
+    component = select_adaptive_scale_component(
+        image,
+        center_x,
+        center_y,
+        reference_side,
+        previous_bbox,
+        config,
+    )
+
+    diag = {
+        "frame_index": None,
+        "requested_center_x": center_x,
+        "requested_center_y": center_y,
+        "center_x": center_x,
+        "center_y": center_y,
+        "seed_side": seed_side,
+        "previous_side": previous_accepted_target_side,
+        "previous_accepted_target_side": previous_accepted_target_side,
+        "component_area": None,
+        "component_bbox_width": None,
+        "component_bbox_height": None,
+        "equivalent_diameter": None,
+        "raw_component_side": None,
+        "padded_side": None,
+        "gated_side": None,
+        "accepted_target_side": None,
+        "requested_target_side": None,
+        "requested_target_bbox": None,
+        "visible_bbox": None,
+        "edge_clipped": False,
+        "fallback_reason": None,
+        "lost": False,
+        "adaptiveScaleStage": None,
+    }
+
+    if component is None:
+        diag["fallback_reason"] = "no_valid_component"
+        diag["adaptiveScaleStage"] = "component_selection"
+        gated_side = reference_side
+    else:
+        raw_side = median_component_side(
+            component["component_bbox_width"],
+            component["component_bbox_height"],
+            component["component_area"],
+        )
+        padded_side = raw_side * config.adaptive_padding_factor
+        gated_side = gate_adaptive_side(padded_side, reference_side, config)
+        diag["component_area"] = component["component_area"]
+        diag["component_bbox_width"] = component["component_bbox_width"]
+        diag["component_bbox_height"] = component["component_bbox_height"]
+        diag["equivalent_diameter"] = component["equivalent_diameter"]
+        diag["raw_component_side"] = raw_side
+        diag["padded_side"] = padded_side
+        diag["gated_side"] = gated_side
+        if abs(gated_side - padded_side) > 1e-6:
+            diag["adaptiveScaleStage"] = "temporal_gating"
+        else:
+            diag["adaptiveScaleStage"] = "raw_diameter_estimation"
+
+    if component is None:
+        diag["gated_side"] = gated_side
+
+    target = build_adaptive_square_target(
+        center_x,
+        center_y,
+        gated_side,
+        image_height,
+        image_width,
+    )
+    diag["accepted_target_side"] = gated_side
+    diag["requested_target_side"] = target["requested_target_side"]
+    diag["requested_target_bbox"] = target["requested_target_bbox"]
+    diag["visible_bbox"] = target["visible_clipped_bbox"]
+    diag["edge_clipped"] = target["edge_clipped"]
+
+    return target["visible_clipped_bbox"], diag
+
+
+def log_adaptive_scale_diagnostics(diag, *, relative_frame, diag_meta=None):
+    if not diag_enabled():
+        return
+    record = {
+        "event": "adaptive_scale",
+        "relativeFrame": relative_frame,
+        **diag,
+    }
+    if diag_meta:
+        record.update({
+            "sessionId": diag_meta.get("sessionId"),
+            "jobFrameIndex": diag_meta.get("jobFrameIndex"),
+            "requestId": diag_meta.get("requestId"),
+            "requestType": diag_meta.get("requestType"),
+        })
+    record["frame_index"] = relative_frame
+    log_frame_record(record)
+
+
 class SessionStaleError(Exception):
     """Raised when CVAT returns a session_key the worker no longer holds."""
 
@@ -715,17 +1152,31 @@ class ModelHandler:
         prompt_bbox,
         last_known_bbox,
         prev_lost,
+        relative_frame=None,
+        diag_meta=None,
+        previous_accepted_target_side=None,
     ):
         if prev_lost:
-            return None, True
+            return None, True, None, None
 
         reference_bbox = prompt_bbox if is_init_frame else last_known_bbox
-        bbox = self._output_to_bbox(outputs, sess, reference_bbox)
+        if self.config.output_policy == "adaptive_component_square_box":
+            center_cfg = replace(self.config, output_policy="mask_center_box")
+            bbox = select_bbox_from_outputs(
+                outputs,
+                sess["image_height"],
+                sess["image_width"],
+                reference_bbox,
+                center_cfg,
+            )
+        else:
+            bbox = self._output_to_bbox(outputs, sess, reference_bbox)
+
         if bbox is None:
             if is_init_frame:
                 bbox = prompt_bbox
             else:
-                return None, True
+                return None, True, None, None
 
         bbox = self._maybe_refine_bbox(
             frame_image,
@@ -736,7 +1187,7 @@ class ModelHandler:
             if is_init_frame:
                 bbox = prompt_bbox
             else:
-                return None, True
+                return None, True, None, None
 
         if (
             not is_init_frame
@@ -745,9 +1196,37 @@ class ModelHandler:
             and _bboxes_near(bbox, prompt_bbox)
             and not _bboxes_near(last_known_bbox, prompt_bbox)
         ):
-            return None, True
+            return None, True, None, None
 
-        return bbox, False
+        canonical_tracking_bbox = list(bbox)
+        emitted_bbox = canonical_tracking_bbox
+        adaptive_diag = None
+        if self.config.output_policy == "adaptive_component_square_box":
+            emitted_bbox, adaptive_diag = apply_adaptive_component_square_box(
+                frame_image,
+                canonical_tracking_bbox,
+                prompt_bbox,
+                None if is_init_frame else last_known_bbox,
+                is_init_frame,
+                self.config,
+                previous_accepted_target_side=previous_accepted_target_side,
+            )
+            if adaptive_diag is not None:
+                can_cx, can_cy = bbox_center(canonical_tracking_bbox)
+                emit_cx, emit_cy = bbox_center(emitted_bbox)
+                adaptive_diag["canonical_tracking_bbox"] = canonical_tracking_bbox
+                adaptive_diag["canonical_center_x"] = can_cx
+                adaptive_diag["canonical_center_y"] = can_cy
+                adaptive_diag["emitted_bbox"] = emitted_bbox
+                adaptive_diag["emitted_center_x"] = emit_cx
+                adaptive_diag["emitted_center_y"] = emit_cy
+                log_adaptive_scale_diagnostics(
+                    adaptive_diag,
+                    relative_frame=relative_frame,
+                    diag_meta=diag_meta,
+                )
+
+        return emitted_bbox, False, adaptive_diag, canonical_tracking_bbox
 
     def _build_frame_cache(
         self,
@@ -766,6 +1245,7 @@ class ModelHandler:
 
             prev_bbox = None
             prev_lost = False
+            prev_accepted_target_side = None
             prompt_bbox = sess["prompt_bbox"]
 
             for relative_frame in range(int(preload_count)):
@@ -773,22 +1253,32 @@ class ModelHandler:
                 outputs = outputs_by_frame.get(relative_frame)
                 is_init_frame = relative_frame == 0
                 last_known_bbox = prev_bbox if prev_bbox is not None else prompt_bbox
-                bbox, lost = self._postprocess_frame_outputs(
-                    sess,
-                    frame_image,
-                    outputs,
-                    is_init_frame=is_init_frame,
-                    prompt_bbox=prompt_bbox,
-                    last_known_bbox=last_known_bbox,
-                    prev_lost=prev_lost,
+                emitted_bbox, lost, adaptive_diag, canonical_tracking_bbox = (
+                    self._postprocess_frame_outputs(
+                        sess,
+                        frame_image,
+                        outputs,
+                        is_init_frame=is_init_frame,
+                        prompt_bbox=prompt_bbox,
+                        last_known_bbox=last_known_bbox,
+                        prev_lost=prev_lost,
+                        relative_frame=relative_frame,
+                        previous_accepted_target_side=prev_accepted_target_side,
+                    )
                 )
-                cache[relative_frame] = {"bbox": bbox, "lost": lost}
+                cache[relative_frame] = {"bbox": emitted_bbox, "lost": lost}
                 if lost:
                     prev_lost = True
                     prev_bbox = None
+                    prev_accepted_target_side = None
                 else:
                     prev_lost = False
-                    prev_bbox = bbox
+                    prev_bbox = canonical_tracking_bbox
+                    if (
+                        self.config.output_policy == "adaptive_component_square_box"
+                        and adaptive_diag is not None
+                    ):
+                        prev_accepted_target_side = adaptive_diag.get("accepted_target_side")
 
             sess["frame_cache"] = cache
             sess["cache_ready"] = True
