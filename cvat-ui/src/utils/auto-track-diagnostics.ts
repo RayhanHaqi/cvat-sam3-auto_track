@@ -26,7 +26,8 @@ export type AutoTrackDiagEventName =
     | 'session_lost'
     | 'session_complete'
     | 'session_error'
-    | 'stale_result_dropped';
+    | 'stale_result_dropped'
+    | 'g0_timeline_ingested';
 
 export type AutoTrackDiagTrendLabel = 'stable' | 'increasing' | 'decreasing' | 'insufficient_data';
 
