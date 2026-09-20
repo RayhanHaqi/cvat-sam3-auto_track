@@ -469,5 +469,88 @@ class Sam3PreloadTerminalResponseTests(_LambdaTestCaseBase):
         self.assertEqual(result["shapes"], [])
         self.assertEqual(result["states"], [])
 
-    def test_sam3_preload_chunk_cap_remains_96(self):
-        self.assertEqual(SAM3_PRELOAD_CHUNK_CAP, 96)
+    def test_sam3_preload_chunk_cap_is_128(self):
+        self.assertEqual(SAM3_PRELOAD_CHUNK_CAP, 128)
+
+
+class Sam3G0TimelineEnrichmentTests(_LambdaTestCaseBase):
+    def setUp(self):
+        super().setUp()
+        images_main_task = self._generate_task_images(3)
+        self.main_task = self._create_task(tasks["main"], images_main_task)
+
+    def _sam3_function(self) -> LambdaFunction:
+        from cvat.apps.lambda_manager.views import LambdaGateway
+
+        gateway = LambdaGateway()
+        return LambdaFunction(gateway, functions["positive"][SAM3_TRACKER_FUNCTION_ID])
+
+    def test_init_response_preload_summary_enriched_from_timeline_diag(self):
+        from cvat.apps.engine.models import Job, Task
+
+        func = self._sam3_function()
+        db_task = Task.objects.get(pk=self.main_task["id"])
+        job = Job.objects.get(segment__task_id=db_task.id)
+        nuclio_response = {
+            "shapes": [[1.0, 2.0, 3.0, 4.0]],
+            "states": [{"session_key": "k", "base_frame": 0, "preloaded_count": 2}],
+            "preload_timeline": [
+                {
+                    "frame": 0,
+                    "relative_frame": 0,
+                    "bbox_status": "valid",
+                    "points": [1.0, 2.0, 3.0, 4.0],
+                    "lost": False,
+                },
+                {
+                    "frame": 1,
+                    "relative_frame": 1,
+                    "bbox_status": "valid",
+                    "points": [2.0, 3.0, 4.0, 5.0],
+                    "lost": False,
+                },
+            ],
+            "preload_summary": {
+                "base_frame": 0,
+                "preloaded_count": 2,
+                "preloaded_until_frame": 1,
+            },
+        }
+
+        with mock.patch.object(
+            func,
+            "_resolve_sam3_preload_frames",
+            return_value=(
+                [0, 1],
+                {
+                    "sourceTimelineVerified": True,
+                    "preloadStartRawIndex": 10,
+                    "preloadEndRawIndex": 11,
+                    "firstSourceGapAtCvatFrame": None,
+                    "firstSourceGapDelta": None,
+                    "preloadStopReason": "job_end",
+                },
+            ),
+        ):
+            with mock.patch.object(
+                func,
+                "_fetch_sam3_frame_images",
+                return_value=(["a", "b"], {0: "a", 1: "b"}),
+            ):
+                with mock.patch.object(func.gateway, "invoke", return_value=nuclio_response):
+                    result = func.invoke(
+                        db_task,
+                        {
+                            "frame": 0,
+                            "shapes": [{"type": "rectangle", "points": [1, 2, 3, 4]}],
+                            "job": job.id,
+                        },
+                        db_job=job,
+                    )
+
+        summary = result["preload_summary"]
+        self.assertEqual(summary["stop_reason"], "job_end")
+        self.assertTrue(summary["source_timeline_verified"])
+        self.assertEqual(summary["preload_start_raw_index"], 10)
+        self.assertEqual(summary["preload_end_raw_index"], 11)
+        self.assertEqual(len(result["preload_timeline"]), 2)

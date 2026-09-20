@@ -20,6 +20,9 @@ _spec.loader.exec_module(_mod)
 Sam3Config = _mod.Sam3Config
 ModelHandler = _mod.ModelHandler
 apply_adaptive_component_square_box = _mod.apply_adaptive_component_square_box
+apply_adaptive_component_deadband_box = _mod.apply_adaptive_component_deadband_box
+apply_adaptive_component_latent_prior_box = _mod.apply_adaptive_component_latent_prior_box
+_latent_prior_state_from_diag = _mod._latent_prior_state_from_diag
 bbox_center = _mod.bbox_center
 bbox_side_length = _mod.bbox_side_length
 build_adaptive_square_target = _mod.build_adaptive_square_target
@@ -494,3 +497,826 @@ def test_cache_stores_only_bbox_and_lost_for_adaptive_policy():
     assert len(handler.predictor.stream_requests) == init_stream_count
     assert len(handler.predictor.handle_requests) == init_handle_count
     assert shapes[0] == cache[2]["bbox"]
+
+
+def _deadband_cfg(**overrides):
+    values = {
+        "adaptive_padding_factor": 1.10,
+        "adaptive_deadband_ratio": 0.15,
+        "adaptive_expansion_only": True,
+        "adaptive_max_growth_ratio": 1.30,
+    }
+    values.update(overrides)
+    return Sam3Config(**values)
+
+
+def test_load_sam3_config_accepts_deadband_policy_defaults():
+    cfg = load_sam3_config({"SAM3_OUTPUT_POLICY": "adaptive_component_deadband_box"})
+    assert cfg.output_policy == "adaptive_component_deadband_box"
+    assert cfg.adaptive_padding_factor == pytest.approx(1.10)
+    assert cfg.adaptive_deadband_ratio == pytest.approx(0.15)
+    assert cfg.adaptive_expansion_only is True
+
+
+def test_deadband_inside_deadband_emits_canonical_bbox_byte_for_byte():
+    image = _dark_frame(200, 200)
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    _draw_disk(image, 100, 100, radius=10, intensity=255)
+    bbox, diag = apply_adaptive_component_deadband_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=_deadband_cfg(),
+        previous_accepted_target_side=20.0,
+    )
+    assert bbox == center_bbox
+    assert diag["adaptive_emitted"] is False
+    assert diag["deadband_blocked"] is True
+    assert diag["temporal_gate_blocked"] is False
+    assert diag["accepted_target_side"] == pytest.approx(bbox_side_length(center_bbox))
+
+
+def test_deadband_temporal_gate_shrinks_raw_expansion_to_canonical_fallback():
+    image = _dark_frame(200, 200)
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    canonical_side = bbox_side_length(center_bbox)
+    _draw_disk(image, 100, 100, radius=12, intensity=255)
+    bbox, diag = apply_adaptive_component_deadband_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=_deadband_cfg(),
+        previous_accepted_target_side=14.0,
+    )
+    assert diag["raw_candidate_side"] > canonical_side
+    assert diag["relative_side_delta"] > _deadband_cfg().adaptive_deadband_ratio
+    assert diag["gated_candidate_side"] <= canonical_side
+    assert bbox == center_bbox
+    assert diag["adaptive_emitted"] is False
+    assert diag["temporal_gate_blocked"] is True
+    assert diag["fallback_reason"] == "temporal_gate_expansion_only"
+    assert diag["previous_accepted_target_side_after"] == pytest.approx(canonical_side)
+
+
+def test_deadband_temporal_gate_puts_gated_expansion_inside_deadband():
+    image = _dark_frame(200, 200)
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    canonical_side = bbox_side_length(center_bbox)
+    cfg = _deadband_cfg()
+    _draw_disk(image, 100, 100, radius=13, intensity=255)
+    bbox, diag = apply_adaptive_component_deadband_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        previous_accepted_target_side=17.5,
+    )
+    assert diag["raw_candidate_side"] > canonical_side
+    assert diag["relative_side_delta"] > cfg.adaptive_deadband_ratio
+    assert diag["gated_candidate_side"] > canonical_side
+    assert diag["final_relative_side_delta"] <= cfg.adaptive_deadband_ratio
+    assert bbox == center_bbox
+    assert diag["adaptive_emitted"] is False
+    assert diag["temporal_gate_blocked"] is True
+    assert diag["fallback_reason"] == "temporal_gate_deadband"
+    assert diag["previous_accepted_target_side_after"] == pytest.approx(canonical_side)
+
+
+def test_deadband_stale_scale_reset_after_temporal_gate_block():
+    image_expand = _dark_frame(200, 200)
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    canonical_side = bbox_side_length(center_bbox)
+    cfg = _deadband_cfg()
+    _draw_disk(image_expand, 100, 100, radius=16, intensity=255)
+    _expanded, diag_expand = apply_adaptive_component_deadband_box(
+        image_expand,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        previous_accepted_target_side=20.0,
+    )
+    stale_side = diag_expand["accepted_target_side"]
+    assert stale_side > canonical_side
+
+    image_gate_block = _dark_frame(200, 200)
+    _draw_disk(image_gate_block, 100, 100, radius=12, intensity=255)
+    cfg_tight_gate = _deadband_cfg(adaptive_max_growth_ratio=0.57)
+    _blocked, diag_blocked = apply_adaptive_component_deadband_box(
+        image_gate_block,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg_tight_gate,
+        previous_accepted_target_side=stale_side,
+    )
+    assert diag_blocked["temporal_gate_blocked"] is True
+    assert diag_blocked["previous_accepted_target_side_after"] == pytest.approx(canonical_side)
+    reset_side = diag_blocked["accepted_target_side"]
+
+    image_next = _dark_frame(200, 200)
+    _draw_disk(image_next, 100, 100, radius=16, intensity=255)
+    _next_bbox, diag_next = apply_adaptive_component_deadband_box(
+        image_next,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        previous_accepted_target_side=reset_side,
+    )
+    assert diag_next["previous_accepted_target_side_before"] == pytest.approx(canonical_side)
+    assert diag_next["previous_accepted_target_side_before"] != pytest.approx(stale_side)
+    assert diag_next["gated_side"] <= canonical_side * cfg.adaptive_max_growth_ratio + 1e-6
+
+
+def test_deadband_high_growth_emits_adaptive_square_bbox():
+    image = _dark_frame(200, 200)
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    _draw_disk(image, 100, 100, radius=16, intensity=255)
+    bbox, diag = apply_adaptive_component_deadband_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=_deadband_cfg(),
+        previous_accepted_target_side=20.0,
+    )
+    assert diag["adaptive_emitted"] is True
+    assert bbox != center_bbox
+    out_cx, out_cy = bbox_center(bbox)
+    assert abs(out_cx - 100.0) < 1e-6
+    assert abs(out_cy - 100.0) < 1e-6
+    assert abs((bbox[2] - bbox[0]) - (bbox[3] - bbox[1])) < 1e-6
+    assert bbox_side_length(bbox) > bbox_side_length(center_bbox)
+
+
+def test_deadband_expansion_only_blocks_valid_shrink_candidate():
+    image = _dark_frame(200, 200)
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    _draw_disk(image, 100, 100, radius=4, intensity=255)
+    bbox, diag = apply_adaptive_component_deadband_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=_deadband_cfg(),
+        previous_accepted_target_side=20.0,
+    )
+    assert bbox == center_bbox
+    assert diag["expansion_only_blocked"] is True
+    assert diag["adaptive_emitted"] is False
+
+
+def test_deadband_no_valid_component_emits_canonical_not_prior_adaptive():
+    image = _dark_frame(200, 200)
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    bbox, diag = apply_adaptive_component_deadband_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=_deadband_cfg(),
+        previous_accepted_target_side=40.0,
+    )
+    assert bbox == center_bbox
+    assert diag["fallback_reason"] == "no_valid_component"
+    assert diag["accepted_target_side"] == pytest.approx(bbox_side_length(center_bbox))
+    assert diag["accepted_target_side"] != pytest.approx(40.0)
+
+
+def test_deadband_blocked_frame_resets_previous_accepted_target_side_to_canonical():
+    image_expand = _dark_frame(200, 200)
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    _draw_disk(image_expand, 100, 100, radius=16, intensity=255)
+    cfg = _deadband_cfg()
+    _expanded, diag_expand = apply_adaptive_component_deadband_box(
+        image_expand,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        previous_accepted_target_side=20.0,
+    )
+    assert diag_expand["adaptive_emitted"] is True
+    assert diag_expand["accepted_target_side"] > bbox_side_length(center_bbox)
+
+    image_deadband = _dark_frame(200, 200)
+    _draw_disk(image_deadband, 100, 100, radius=10, intensity=255)
+    blocked_bbox, diag_blocked = apply_adaptive_component_deadband_box(
+        image_deadband,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        previous_accepted_target_side=diag_expand["accepted_target_side"],
+    )
+    assert blocked_bbox == center_bbox
+    assert diag_blocked["deadband_blocked"] is True
+    assert diag_blocked["previous_accepted_target_side_before"] == pytest.approx(
+        diag_expand["accepted_target_side"]
+    )
+    assert diag_blocked["previous_accepted_target_side_after"] == pytest.approx(
+        bbox_side_length(center_bbox)
+    )
+
+
+def test_deadband_canonical_fallback_prevents_stale_temporal_gating_reference():
+    image_expand = _dark_frame(200, 200)
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    _draw_disk(image_expand, 100, 100, radius=16, intensity=255)
+    cfg = _deadband_cfg()
+    _expanded, diag_expand = apply_adaptive_component_deadband_box(
+        image_expand,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        previous_accepted_target_side=20.0,
+    )
+    stale_side = diag_expand["accepted_target_side"]
+    assert stale_side > bbox_side_length(center_bbox)
+
+    image_deadband = _dark_frame(200, 200)
+    _draw_disk(image_deadband, 100, 100, radius=10, intensity=255)
+    _blocked, diag_blocked = apply_adaptive_component_deadband_box(
+        image_deadband,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        previous_accepted_target_side=stale_side,
+    )
+    reset_side = diag_blocked["accepted_target_side"]
+    assert reset_side == pytest.approx(bbox_side_length(center_bbox))
+
+    image_next = _dark_frame(200, 200)
+    _draw_disk(image_next, 100, 100, radius=16, intensity=255)
+    _next_bbox, diag_next = apply_adaptive_component_deadband_box(
+        image_next,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        previous_accepted_target_side=reset_side,
+    )
+    assert diag_next["previous_accepted_target_side_before"] == pytest.approx(reset_side)
+    assert diag_next["gated_side"] <= reset_side * cfg.adaptive_max_growth_ratio + 1e-6
+
+
+def test_postprocess_loss_semantics_unchanged_for_deadband_policy():
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(output_policy="adaptive_component_deadband_box")
+    sess = {"image_height": 100, "image_width": 100}
+    seed = [10.0, 10.0, 30.0, 30.0]
+    moved = [50.0, 50.0, 70.0, 70.0]
+    frame_image = np.zeros((100, 100, 3), dtype=np.uint8)
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[18:22, 18:22] = 1
+    handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
+
+    bbox, lost, _diag, _canonical = handler._postprocess_frame_outputs(
+        sess,
+        frame_image,
+        {"out_binary_masks": [mask]},
+        is_init_frame=False,
+        prompt_bbox=seed,
+        last_known_bbox=moved,
+        prev_lost=False,
+    )
+    assert bbox is None
+    assert lost is True
+
+
+def test_cache_stores_only_bbox_and_lost_for_deadband_policy():
+    import base64
+
+    preload_count = 3
+    stream = [
+        {"frame_index": idx, "outputs": {"out_boxes_xywh": [[0.1, 0.1, 0.05, 0.05]]}}
+        for idx in range(preload_count)
+    ]
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(
+        output_policy="adaptive_component_deadband_box",
+        ir_refine_enabled=False,
+    )
+    handler.predictor = _FakePredictor(stream)
+    handler._sessions = {}
+    seed = [40.0, 40.0, 60.0, 60.0]
+
+    buf = io.BytesIO()
+    image = _dark_frame(100, 100)
+    _draw_disk(image, 50, 50, radius=8, intensity=255)
+    Image.fromarray(image).save(buf, format="JPEG")
+    preload_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    preload_images = [preload_b64 for _ in range(preload_count)]
+
+    _shapes, states = handler.infer_batch(
+        None,
+        [seed],
+        [],
+        frame_index=0,
+        preload_images=preload_images,
+        preload_base_frame=0,
+        preload_frame_count=preload_count,
+    )
+    key = states[0]["session_key"]
+    cache = handler._sessions[key]["frame_cache"]
+    for entry in cache.values():
+        assert set(entry.keys()) == {"bbox", "lost"}
+    assert states[0].get("accepted_target_side") is None
+
+
+def _latent_prior_cfg(**overrides):
+    values = {
+        "adaptive_padding_factor": 1.10,
+        "adaptive_deadband_ratio": 0.15,
+        "adaptive_expansion_only": True,
+        "adaptive_max_growth_ratio": 1.30,
+        "adaptive_selection_prior_max_age_frames": 20,
+        "adaptive_emission_hold_max_age_frames": 4,
+        "adaptive_growth_confirmations": 2,
+    }
+    values.update(overrides)
+    return Sam3Config(**values)
+
+
+def test_latent_prior_selection_prior_survives_in_deadband_component_frame():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    canonical_side = bbox_side_length(center_bbox)
+    cfg = _latent_prior_cfg()
+    image_grow = _dark_frame(200, 200)
+    _draw_disk(image_grow, 100, 100, radius=16, intensity=255)
+    _grow_bbox, grow_diag = apply_adaptive_component_latent_prior_box(
+        image_grow,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+    )
+    state = _latent_prior_state_from_diag(grow_diag)
+    assert grow_diag["growth_confirmation_count"] == 1
+    assert grow_diag["adaptive_emitted"] is False
+
+    image_deadband = _dark_frame(200, 200)
+    _draw_disk(image_deadband, 100, 100, radius=10, intensity=255)
+    blocked_bbox, blocked_diag = apply_adaptive_component_latent_prior_box(
+        image_deadband,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=state,
+    )
+    assert blocked_bbox == center_bbox
+    assert blocked_diag["adaptive_emitted"] is False
+    assert blocked_diag["growth_confirmation_count"] == 0
+    assert blocked_diag["selection_prior_side_after"] != pytest.approx(canonical_side)
+    assert blocked_diag["selection_prior_side_after"] == pytest.approx(
+        blocked_diag["gated_candidate_side"]
+    )
+
+
+def test_latent_prior_selection_prior_survives_no_component_frame():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    cfg = _latent_prior_cfg()
+    image_grow = _dark_frame(200, 200)
+    _draw_disk(image_grow, 100, 100, radius=16, intensity=255)
+    _bbox, grow_diag = apply_adaptive_component_latent_prior_box(
+        image_grow,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+    )
+    prior_side = grow_diag["selection_prior_side_after"]
+    state = _latent_prior_state_from_diag(grow_diag)
+
+    blank = _dark_frame(200, 200)
+    no_comp_bbox, no_comp_diag = apply_adaptive_component_latent_prior_box(
+        blank,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=state,
+    )
+    assert no_comp_bbox == center_bbox
+    assert no_comp_diag["component_valid"] is False
+    assert no_comp_diag["selection_prior_side_after"] == pytest.approx(prior_side)
+    assert no_comp_diag["selection_prior_age"] == 1
+
+
+def test_latent_prior_selection_prior_expires_after_twenty_no_component_frames():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    canonical_side = bbox_side_length(center_bbox)
+    stale_side = 30.0
+    assert stale_side != pytest.approx(canonical_side)
+    cfg = _latent_prior_cfg(adaptive_selection_prior_max_age_frames=20)
+    state = {
+        "selection_prior_side": stale_side,
+        "selection_prior_age": 19,
+        "growth_confirmation_count": 0,
+        "emission_prior_side": None,
+        "emission_hold_age": 0,
+    }
+    blank = _dark_frame(200, 200)
+    _bbox, diag = apply_adaptive_component_latent_prior_box(
+        blank,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=state,
+    )
+    assert diag["selection_prior_side_after"] == pytest.approx(canonical_side)
+    assert diag["selection_prior_age"] == 0
+    assert diag["growth_confirmation_count"] == 0
+    assert diag["emission_prior_side_after"] is None
+    assert diag["emission_hold_age"] == 0
+    assert diag["emission_hold_active"] is False
+    assert diag["growth_confirmation_reset_reason"] == "selection_prior_expired"
+
+
+def test_latent_prior_selection_prior_preserves_through_nineteenth_no_component_frame():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    canonical_side = bbox_side_length(center_bbox)
+    stale_side = 30.0
+    cfg = _latent_prior_cfg(adaptive_selection_prior_max_age_frames=20)
+    state = {
+        "selection_prior_side": stale_side,
+        "selection_prior_age": 18,
+        "growth_confirmation_count": 0,
+        "emission_prior_side": None,
+        "emission_hold_age": 0,
+    }
+    blank = _dark_frame(200, 200)
+    _bbox, diag = apply_adaptive_component_latent_prior_box(
+        blank,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=state,
+    )
+    assert diag["selection_prior_side_after"] == pytest.approx(stale_side)
+    assert diag["selection_prior_side_after"] != pytest.approx(canonical_side)
+    assert diag["selection_prior_age"] == 19
+    assert diag["growth_confirmation_reset_reason"] != "selection_prior_expired"
+
+
+def test_latent_prior_post_expiry_valid_component_uses_canonical_reference():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    canonical_side = bbox_side_length(center_bbox)
+    stale_side = 30.0
+    cfg = _latent_prior_cfg(adaptive_selection_prior_max_age_frames=20)
+    expired_state = {
+        "selection_prior_side": stale_side,
+        "selection_prior_age": 19,
+        "growth_confirmation_count": 0,
+        "emission_prior_side": None,
+        "emission_hold_age": 0,
+    }
+    blank = _dark_frame(200, 200)
+    _expired_bbox, expired_diag = apply_adaptive_component_latent_prior_box(
+        blank,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=expired_state,
+    )
+    assert expired_diag["selection_prior_side_after"] == pytest.approx(canonical_side)
+    assert expired_diag["selection_prior_age"] == 0
+
+    image = _dark_frame(200, 200)
+    _draw_disk(image, 100, 100, radius=16, intensity=255)
+    _bbox, grow_diag = apply_adaptive_component_latent_prior_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=_latent_prior_state_from_diag(expired_diag),
+    )
+    assert grow_diag["selection_prior_side_before"] == pytest.approx(canonical_side)
+    assert grow_diag["selection_prior_side_before"] != pytest.approx(stale_side)
+    assert grow_diag["component_valid"] is True
+
+
+def test_latent_prior_expiry_clears_growth_confirmations_and_emission_hold():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    canonical_side = bbox_side_length(center_bbox)
+    cfg = _latent_prior_cfg(adaptive_selection_prior_max_age_frames=20)
+    state = {
+        "selection_prior_side": 30.0,
+        "selection_prior_age": 19,
+        "growth_confirmation_count": 2,
+        "emission_prior_side": 35.0,
+        "emission_hold_age": 1,
+    }
+    blank = _dark_frame(200, 200)
+    _bbox, diag = apply_adaptive_component_latent_prior_box(
+        blank,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=state,
+    )
+    assert diag["selection_prior_side_after"] == pytest.approx(canonical_side)
+    assert diag["selection_prior_age"] == 0
+    assert diag["growth_confirmation_count"] == 0
+    assert diag["emission_prior_side_after"] is None
+    assert diag["emission_hold_age"] == 0
+    assert diag["emission_hold_active"] is False
+    assert diag["emission_hold_clear_reason"] == "selection_prior_expired"
+
+
+def test_latent_prior_two_consecutive_growth_supports_activate_emission():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    cfg = _latent_prior_cfg()
+    image = _dark_frame(200, 200)
+    _draw_disk(image, 100, 100, radius=16, intensity=255)
+    _bbox1, diag1 = apply_adaptive_component_latent_prior_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+    )
+    assert diag1["growth_confirmation_count"] == 1
+    assert diag1["adaptive_emitted"] is False
+
+    image2 = _dark_frame(200, 200)
+    _draw_disk(image2, 100, 100, radius=16, intensity=255)
+    bbox2, diag2 = apply_adaptive_component_latent_prior_box(
+        image2,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=_latent_prior_state_from_diag(diag1),
+    )
+    assert diag2["growth_confirmation_count"] == 2
+    assert diag2["adaptive_emitted"] is True
+    assert bbox_side_length(bbox2) > bbox_side_length(center_bbox)
+
+
+def test_latent_prior_one_frame_growth_spike_does_not_activate_hold():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    cfg = _latent_prior_cfg()
+    image = _dark_frame(200, 200)
+    _draw_disk(image, 100, 100, radius=16, intensity=255)
+    _bbox, diag = apply_adaptive_component_latent_prior_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+    )
+    assert diag["growth_confirmation_count"] == 1
+    assert diag["emission_prior_side_after"] is None
+    assert diag["adaptive_emitted"] is False
+
+
+def test_latent_prior_hold_emits_across_no_component_frames_then_expires():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    cfg = _latent_prior_cfg(adaptive_emission_hold_max_age_frames=4)
+    image = _dark_frame(200, 200)
+    _draw_disk(image, 100, 100, radius=16, intensity=255)
+    _bbox1, diag1 = apply_adaptive_component_latent_prior_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+    )
+    _bbox2, diag2 = apply_adaptive_component_latent_prior_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=_latent_prior_state_from_diag(diag1),
+    )
+    assert diag2["adaptive_emitted"] is True
+    state = _latent_prior_state_from_diag(diag2)
+    blank = _dark_frame(200, 200)
+    held_frames = 0
+    for _ in range(6):
+        bbox, diag = apply_adaptive_component_latent_prior_box(
+            blank,
+            center_bbox,
+            [88.0, 88.0, 108.0, 108.0],
+            previous_bbox=center_bbox,
+            is_init_frame=False,
+            config=cfg,
+            latent_prior_state=state,
+        )
+        if diag.get("emission_hold_active"):
+            held_frames += 1
+            assert bbox_side_length(bbox) > bbox_side_length(center_bbox)
+        else:
+            assert bbox == center_bbox
+            if diag.get("emission_hold_clear_reason") == "hold_expired":
+                break
+        state = _latent_prior_state_from_diag(diag)
+    assert held_frames == 4
+
+
+def test_latent_prior_shrink_component_clears_active_hold():
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    cfg = _latent_prior_cfg()
+    image = _dark_frame(200, 200)
+    _draw_disk(image, 100, 100, radius=16, intensity=255)
+    _bbox1, diag1 = apply_adaptive_component_latent_prior_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+    )
+    _bbox2, diag2 = apply_adaptive_component_latent_prior_box(
+        image,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=_latent_prior_state_from_diag(diag1),
+    )
+    assert diag2["adaptive_emitted"] is True
+    state = _latent_prior_state_from_diag(diag2)
+
+    image_shrink = _dark_frame(200, 200)
+    _draw_disk(image_shrink, 100, 100, radius=6, intensity=255)
+    bbox, diag = apply_adaptive_component_latent_prior_box(
+        image_shrink,
+        center_bbox,
+        [88.0, 88.0, 108.0, 108.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=state,
+    )
+    assert bbox == center_bbox
+    assert diag["emission_prior_side_after"] is None
+    assert diag["emission_hold_clear_reason"] == "non_growth_component"
+
+
+def test_latent_prior_pilot02_style_small_growth_stays_canonical():
+    center_bbox = [90.0, 90.0, 105.4, 105.4]
+    canonical_side = bbox_side_length(center_bbox)
+    cfg = _latent_prior_cfg()
+    image = _dark_frame(200, 200)
+    _draw_disk(image, 97, 97, radius=8, intensity=255)
+    bbox, diag = apply_adaptive_component_latent_prior_box(
+        image,
+        center_bbox,
+        center_bbox,
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state={
+            "selection_prior_side": canonical_side,
+            "selection_prior_age": 0,
+            "growth_confirmation_count": 1,
+            "emission_prior_side": None,
+            "emission_hold_age": 0,
+        },
+    )
+    assert diag["component_valid"] is True
+    assert diag["relative_side_delta"] is not None
+    assert diag["relative_side_delta"] <= cfg.adaptive_deadband_ratio + 1e-6
+    assert diag["adaptive_emitted"] is False
+    assert bbox == center_bbox
+    assert diag["growth_confirmation_count"] == 0
+
+
+def test_latent_prior_edge_clipped_hold_retains_preclip_side_in_emission_prior():
+    center_bbox = [-19.0, -19.0, 21.0, 21.0]
+    cfg = _latent_prior_cfg()
+    blank = _dark_frame(100, 100)
+    state = {
+        "selection_prior_side": 40.0,
+        "selection_prior_age": 0,
+        "growth_confirmation_count": 0,
+        "emission_prior_side": 50.0,
+        "emission_hold_age": 0,
+    }
+    bbox, diag = apply_adaptive_component_latent_prior_box(
+        blank,
+        center_bbox,
+        [0.0, 0.0, 20.0, 20.0],
+        previous_bbox=center_bbox,
+        is_init_frame=False,
+        config=cfg,
+        latent_prior_state=state,
+    )
+    assert diag["emission_hold_active"] is True
+    assert diag["edge_clipped"] is True
+    assert diag["emission_prior_side_after"] == pytest.approx(50.0)
+    assert bbox_side_length(bbox) < diag["emission_prior_side_after"]
+
+
+def test_cache_stores_only_bbox_and_lost_for_latent_prior_policy():
+    import base64
+    preload_count = 3
+    stream = [
+        {"frame_index": idx, "outputs": {"out_boxes_xywh": [[0.1, 0.1, 0.05, 0.05]]}}
+        for idx in range(preload_count)
+    ]
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(
+        output_policy="adaptive_component_latent_prior_box",
+        ir_refine_enabled=False,
+    )
+    handler.predictor = _FakePredictor(stream)
+    handler._sessions = {}
+    seed = [40.0, 40.0, 60.0, 60.0]
+
+    buf = io.BytesIO()
+    image = _dark_frame(100, 100)
+    _draw_disk(image, 50, 50, radius=8, intensity=255)
+    Image.fromarray(image).save(buf, format="JPEG")
+    preload_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    preload_images = [preload_b64 for _ in range(preload_count)]
+
+    _shapes, states = handler.infer_batch(
+        None,
+        [seed],
+        [],
+        frame_index=0,
+        preload_images=preload_images,
+        preload_base_frame=0,
+        preload_frame_count=preload_count,
+    )
+    key = states[0]["session_key"]
+    cache = handler._sessions[key]["frame_cache"]
+    for entry in cache.values():
+        assert set(entry.keys()) == {"bbox", "lost"}
+    assert states[0].get("selection_prior_side") is None
+
+
+def test_postprocess_loss_semantics_unchanged_for_latent_prior_policy():
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(output_policy="adaptive_component_latent_prior_box")
+    sess = {"image_height": 100, "image_width": 100}
+    seed = [10.0, 10.0, 30.0, 30.0]
+    moved = [50.0, 50.0, 70.0, 70.0]
+    frame_image = np.zeros((100, 100, 3), dtype=np.uint8)
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[18:22, 18:22] = 1
+    handler._maybe_refine_bbox = lambda _image, bbox, previous_bbox=None: bbox
+
+    bbox, lost, _diag, _canonical = handler._postprocess_frame_outputs(
+        sess,
+        frame_image,
+        {"out_binary_masks": [mask]},
+        is_init_frame=False,
+        prompt_bbox=seed,
+        last_known_bbox=moved,
+        prev_lost=False,
+        latent_prior_state={
+            "selection_prior_side": 30.0,
+            "selection_prior_age": 0,
+            "growth_confirmation_count": 2,
+            "emission_prior_side": 35.0,
+            "emission_hold_age": 1,
+        },
+    )
+    assert bbox is None
+    assert lost is True

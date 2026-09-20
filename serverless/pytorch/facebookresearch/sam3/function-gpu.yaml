@@ -30,14 +30,18 @@ spec:
     - name: SAM3_OUTPUT_POLICY
       value: sam_box
     - name: SAM3_OUTPUT_PROB_THRESH
-      value: "0.3"
+      value: "0.0"
     - name: SAM3_IR_REFINE
       value: "1"
     - name: SAM3_IR_STOP_ON_MISSING
+      value: "0"
+    - name: SAM3_RETURN_G0_TIMELINE
+      value: "1"
+    - name: AUTO_TRACK_DIAGNOSTICS
       value: "1"
 
   build:
-    image: cvat.meta.sam3.tracker:v4-gpu
+    image: cvat.meta.sam3.tracker:v4-box-force-tracker-repair-20260920
     baseImage: nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
     directives:
       preCopy:
@@ -78,7 +82,7 @@ spec:
     myHttpTrigger:
       numWorkers: 1
       kind: 'http'
-      workerAvailabilityTimeoutMilliseconds: 10000
+      workerAvailabilityTimeoutMilliseconds: 120000
       attributes:
         maxRequestBodySize: 268435456
 

@@ -88,6 +88,8 @@ def test_init_performs_one_full_chunk_propagation_and_caches_each_frame():
     assert len(handler.predictor.stream_requests) == 1
     assert handler.predictor.stream_requests[0]["start_frame_index"] == 0
     assert handler.predictor.stream_requests[0]["max_frame_num_to_track"] == preload_count - 1
+    assert "output_prob_thresh" not in handler.predictor.stream_requests[0]
+    assert handler.predictor.stream_requests[0]["force_tracker_propagation"] is True
     assert sess["cache_ready"] is True
     assert len(sess["frame_cache"]) == preload_count
     assert sess["session_id"] is None
@@ -96,6 +98,33 @@ def test_init_performs_one_full_chunk_propagation_and_caches_each_frame():
     assert shapes == [[12.0, 12.0, 32.0, 32.0]]
     assert states[0]["base_frame"] == 0
     assert states[0]["preloaded_count"] == preload_count
+
+
+def test_box_mode_propagation_includes_force_tracker_propagation():
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(prompt_mode="box", ir_refine_enabled=False)
+    handler.predictor = _FakePredictor([])
+
+    handler._propagate_full_chunk({"session_id": "s"}, 3)
+
+    request = handler.predictor.stream_requests[0]
+    assert request["force_tracker_propagation"] is True
+    assert "output_prob_thresh" not in request
+    assert request["start_frame_index"] == 0
+    assert request["max_frame_num_to_track"] == 2
+
+
+def test_non_box_mode_propagation_omits_force_tracker_propagation():
+    for mode in ("text_box", "text"):
+        handler = ModelHandler.__new__(ModelHandler)
+        handler.config = Sam3Config(prompt_mode=mode, ir_refine_enabled=False)
+        handler.predictor = _FakePredictor([])
+
+        handler._propagate_full_chunk({"session_id": "s"}, 3)
+
+        request = handler.predictor.stream_requests[0]
+        assert "force_tracker_propagation" not in request
+        assert "output_prob_thresh" not in request
 
 
 def _cached_continue_handler(relative_frame):

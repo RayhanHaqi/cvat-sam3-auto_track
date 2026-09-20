@@ -2,6 +2,7 @@ import base64
 import ctypes
 import io
 import json
+import os
 import time
 
 import numpy as np
@@ -14,6 +15,12 @@ from model_handler import (
     SessionStaleError,
     ValidationError,
     load_sam3_config,
+)
+
+SAM3_RETURN_G0_TIMELINE = os.environ.get("SAM3_RETURN_G0_TIMELINE", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
 )
 
 
@@ -109,7 +116,7 @@ def handler(context, event):
         )
 
         with timed_stage("sam_inference", diagMeta=diag_meta) as stage:
-            out_shapes, out_states = context.user_data.model.infer_batch(
+            inference_result = context.user_data.model.infer_batch(
                 image,
                 shapes,
                 states,
@@ -119,10 +126,22 @@ def handler(context, event):
                 preload_base_frame=preload_base_frame,
                 preload_frame_count=preload_frame_count,
                 preload_payload_bytes=preload_payload_bytes,
+                include_g0_extras=True,
             )
+            if len(inference_result) == 3:
+                out_shapes, out_states, g0_extras = inference_result
+            else:
+                out_shapes, out_states = inference_result
+                g0_extras = None
             stage["samSessionCount"] = len(context.user_data.model._sessions)
 
         response_body = {"shapes": out_shapes, "states": out_states}
+        if (
+            SAM3_RETURN_G0_TIMELINE
+            and g0_extras
+            and is_preload_init
+        ):
+            response_body.update(g0_extras)
         if (
             out_states
             and isinstance(out_states[0], dict)

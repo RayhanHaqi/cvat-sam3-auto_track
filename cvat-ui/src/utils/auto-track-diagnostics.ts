@@ -110,6 +110,7 @@ export interface AutoTrackFrameRecord {
     responsePayloadBytes: number | null;
     annotationStateCount: number | null;
     fullStateReplacement: boolean | null;
+    resultSource?: string | null;
 }
 
 export interface AutoTrackCorrelationSlice {
@@ -147,8 +148,14 @@ export function isAutoTrackDiagnosticsEnabled(): boolean {
 export function boxGeometryFromPoints(points: number[] | null | undefined): BoxGeometrySummary {
     if (!points || points.length < 4) {
         return {
-            xtl: null, ytl: null, xbr: null, ybr: null,
-            width: null, height: null, centerX: null, centerY: null,
+            xtl: null,
+            ytl: null,
+            xbr: null,
+            ybr: null,
+            width: null,
+            height: null,
+            centerX: null,
+            centerY: null,
         };
     }
     const xtl = points[0];
@@ -158,7 +165,12 @@ export function boxGeometryFromPoints(points: number[] | null | undefined): BoxG
     const width = xbr - xtl;
     const height = ybr - ytl;
     return {
-        xtl, ytl, xbr, ybr, width, height,
+        xtl,
+        ytl,
+        xbr,
+        ybr,
+        width,
+        height,
         centerX: (xtl + xbr) / 2,
         centerY: (ytl + ybr) / 2,
     };
@@ -266,6 +278,12 @@ export class AutoTrackDiagnosticsController {
     private maxPendingPromiseCount = 0;
 
     private maxSamMemoryEntryCount = 0;
+
+    private g0TimelineLength: number | null = null;
+
+    private g0TimelineStopReason: string | null = null;
+
+    private localTimelineFrameCount = 0;
 
     public isEnabled(): boolean {
         return isAutoTrackDiagnosticsEnabled();
@@ -432,6 +450,9 @@ export class AutoTrackDiagnosticsController {
     }
 
     public patchCurrentFrame(patch: Partial<AutoTrackFrameRecord>): void {
+        if (patch.resultSource === 'g0_timeline_local') {
+            this.localTimelineFrameCount += 1;
+        }
         if (!this.isEnabled() || !this.currentFrame) return;
         Object.assign(this.currentFrame, patch);
         if (typeof patch.totalVisibleCanvasShapeCount === 'number') {
@@ -602,13 +623,41 @@ export class AutoTrackDiagnosticsController {
                 currentTrackFrameSpan: this.maxCurrentTrackFrameSpan,
             },
             percentiles: {
-                lambdaRoundTripMs: { p50: percentile(lambda, 50), p95: percentile(lambda, 95), max: lambda.length ? Math.max(...lambda) : null },
-                samInferenceMs: { p50: percentile(sam, 50), p95: percentile(sam, 95), max: sam.length ? Math.max(...sam) : null },
-                shapeSaveMs: { p50: percentile(save, 50), p95: percentile(save, 95), max: save.length ? Math.max(...save) : null },
-                annotationsFetchMs: { p50: percentile(fetch, 50), p95: percentile(fetch, 95), max: fetch.length ? Math.max(...fetch) : null },
-                storeUpdateMs: { p50: percentile(store, 50), p95: percentile(store, 95), max: store.length ? Math.max(...store) : null },
-                canvasSetupMs: { p50: percentile(canvas, 50), p95: percentile(canvas, 95), max: canvas.length ? Math.max(...canvas) : null },
-                totalFrameMs: { p50: percentile(totals, 50), p95: percentile(totals, 95), max: totals.length ? Math.max(...totals) : null },
+                lambdaRoundTripMs: {
+                    p50: percentile(lambda, 50),
+                    p95: percentile(lambda, 95),
+                    max: lambda.length ? Math.max(...lambda) : null,
+                },
+                samInferenceMs: {
+                    p50: percentile(sam, 50),
+                    p95: percentile(sam, 95),
+                    max: sam.length ? Math.max(...sam) : null,
+                },
+                shapeSaveMs: {
+                    p50: percentile(save, 50),
+                    p95: percentile(save, 95),
+                    max: save.length ? Math.max(...save) : null,
+                },
+                annotationsFetchMs: {
+                    p50: percentile(fetch, 50),
+                    p95: percentile(fetch, 95),
+                    max: fetch.length ? Math.max(...fetch) : null,
+                },
+                storeUpdateMs: {
+                    p50: percentile(store, 50),
+                    p95: percentile(store, 95),
+                    max: store.length ? Math.max(...store) : null,
+                },
+                canvasSetupMs: {
+                    p50: percentile(canvas, 50),
+                    p95: percentile(canvas, 95),
+                    max: canvas.length ? Math.max(...canvas) : null,
+                },
+                totalFrameMs: {
+                    p50: percentile(totals, 50),
+                    p95: percentile(totals, 95),
+                    max: totals.length ? Math.max(...totals) : null,
+                },
             },
             firstThirdAverage: buildCorrelationSlice(frameThirds.early),
             middleThirdAverage: buildCorrelationSlice(frameThirds.middle),
@@ -626,9 +675,19 @@ export class AutoTrackDiagnosticsController {
             maximumPendingQueueLength: null,
             maximumSamMemoryEntryCount: this.maxSamMemoryEntryCount,
             maximumActiveRequestCount: this.maxActiveLambdaRequests,
+            g0TimelineLength: this.g0TimelineLength,
+            g0TimelineStopReason: this.g0TimelineStopReason,
+            localTimelineFrameCount: this.localTimelineFrameCount,
         };
         // eslint-disable-next-line no-console
         console.info('[AUTO_TRACK_DIAG_SESSION_SUMMARY]', JSON.stringify(summary));
+    }
+
+    public noteG0TimelineIngested(length: number, stopReason: string | null): void {
+        this.g0TimelineLength = length;
+        this.g0TimelineStopReason = stopReason;
+        this.localTimelineFrameCount = 0;
+        this.emit('g0_timeline_ingested', { length, stopReason });
     }
 
     public noteLost(): void {

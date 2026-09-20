@@ -333,3 +333,184 @@ def test_baseline_canonical_equals_emitted():
     assert not lost
     assert emitted == canonical
     assert diag is None
+
+
+def _deadband_handler(**kwargs):
+    return _handler("adaptive_component_deadband_box", **kwargs)
+
+
+def test_deadband_multi_frame_center_invariance_emitted_midpoints():
+    masks = [_mask_at(100 + i, 100 - i, size=6) for i in range(5)]
+    seed = [88.0, 88.0, 112.0, 112.0]
+    _, base_emitted = _postprocess_sequence(_handler("mask_center_box"), masks, seed)
+    _, adapt_emitted = _postprocess_sequence(_deadband_handler(), masks, seed)
+    for rel, (b, a) in enumerate(zip(base_emitted, adapt_emitted)):
+        bc = bbox_center(b)
+        ac = bbox_center(a)
+        assert abs(bc[0] - ac[0]) <= 0.001, f"frame {rel} cx delta"
+        assert abs(bc[1] - ac[1]) <= 0.001, f"frame {rel} cy delta"
+
+
+def test_deadband_canonical_tracking_bbox_never_receives_adaptive_geometry():
+    seed = [90.0, 90.0, 110.0, 110.0]
+    mask = _mask_at(100, 100, size=8)
+    frame_image = _dark_frame()
+    _draw_disk(frame_image, 100, 100, radius=16, intensity=255)
+    sess = _sess()
+
+    base_handler = _handler("mask_center_box")
+    adapt_handler = _deadband_handler()
+
+    _base_emitted, _, _, can_base = base_handler._postprocess_frame_outputs(
+        sess,
+        frame_image,
+        {"out_binary_masks": [mask]},
+        is_init_frame=True,
+        prompt_bbox=seed,
+        last_known_bbox=seed,
+        prev_lost=False,
+    )
+    emitted, _, diag, canonical = adapt_handler._postprocess_frame_outputs(
+        sess,
+        frame_image,
+        {"out_binary_masks": [mask]},
+        is_init_frame=True,
+        prompt_bbox=seed,
+        last_known_bbox=seed,
+        prev_lost=False,
+    )
+    assert bbox_center(canonical) == pytest.approx(bbox_center(can_base), abs=1e-6)
+    assert bbox_side_length(canonical) == pytest.approx(bbox_side_length(can_base), abs=1e-3)
+    if emitted != canonical:
+        assert diag is not None
+        assert diag["adaptive_emitted"] is True
+        assert bbox_center(emitted) == pytest.approx(bbox_center(canonical), abs=1e-6)
+
+
+def test_deadband_fallback_does_not_contaminate_canonical_tracking_bbox():
+    seed = [90.0, 90.0, 110.0, 110.0]
+    center_bbox = [90.0, 90.0, 110.0, 110.0]
+    frame_image = _dark_frame()
+    handler = _deadband_handler()
+    handler._maybe_refine_bbox = lambda *_a, **_k: list(center_bbox)
+
+    emitted, lost, diag, canonical = handler._postprocess_frame_outputs(
+        _sess(),
+        frame_image,
+        {"out_binary_masks": [_mask_at(100, 100)]},
+        is_init_frame=False,
+        prompt_bbox=seed,
+        last_known_bbox=center_bbox,
+        prev_lost=False,
+        previous_accepted_target_side=30.0,
+    )
+    assert not lost
+    assert emitted == center_bbox
+    assert diag["fallback_reason"] == "no_valid_component"
+    assert canonical == center_bbox
+
+
+def test_loss_and_snap_back_semantics_unchanged_for_deadband():
+    handler = _deadband_handler()
+    seed = [10.0, 10.0, 30.0, 30.0]
+    moved = [50.0, 50.0, 70.0, 70.0]
+    frame_image = np.zeros((100, 100, 3), dtype=np.uint8)
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[18:22, 18:22] = 1
+
+    emitted, lost, diag, canonical = handler._postprocess_frame_outputs(
+        {"image_height": 100, "image_width": 100},
+        frame_image,
+        {"out_binary_masks": [mask]},
+        is_init_frame=False,
+        prompt_bbox=seed,
+        last_known_bbox=moved,
+        prev_lost=False,
+    )
+    assert emitted is None
+    assert lost is True
+    assert canonical is None
+    assert diag is None
+
+
+def test_cache_stores_emitted_only_not_canonical_for_deadband_policy():
+    preload_count = 2
+    stream = [
+        {"frame_index": idx, "outputs": {"out_binary_masks": [_mask_at(100, 100)]}}
+        for idx in range(preload_count)
+    ]
+    handler = ModelHandler.__new__(ModelHandler)
+    handler.config = Sam3Config(
+        output_policy="adaptive_component_deadband_box",
+        ir_refine_enabled=False,
+    )
+    handler.predictor = _FakePredictor(stream)
+    handler._sessions = {}
+    handler._maybe_refine_bbox = lambda _i, bbox, previous_bbox=None: bbox
+    seed = [40.0, 40.0, 60.0, 60.0]
+
+    image = _dark_frame(100, 100)
+    _draw_disk(image, 50, 50, radius=10, intensity=255)
+    preload_b64 = _preload_b64(image)
+    preload_images = [preload_b64 for _ in range(preload_count)]
+
+    _shapes, states = handler.infer_batch(
+        None,
+        [seed],
+        [],
+        frame_index=0,
+        preload_images=preload_images,
+        preload_base_frame=0,
+        preload_frame_count=preload_count,
+    )
+    key = states[0]["session_key"]
+    cache = handler._sessions[key]["frame_cache"]
+    for entry in cache.values():
+        assert set(entry.keys()) == {"bbox", "lost"}
+    assert states[0].get("accepted_target_side") is None
+    assert states[0].get("canonical_tracking_bbox") is None
+
+
+def test_latent_prior_canonical_tracking_isolated_from_emitted_bbox():
+    seed = [88.0, 88.0, 112.0, 112.0]
+    mask0 = _mask_at(100, 100, size=6)
+    mask1 = _mask_at(102, 98, size=6)
+
+    base_handler = _handler("mask_center_box")
+    adapt_handler = _handler("adaptive_component_latent_prior_box")
+
+    frame_image0 = _dark_frame()
+    _draw_disk(frame_image0, 100, 100, radius=16, intensity=255)
+    frame_image1 = _dark_frame()
+    _draw_disk(frame_image1, 102, 98, radius=16, intensity=255)
+
+    base0, lost0, _, can0 = base_handler._postprocess_frame_outputs(
+        _sess(), frame_image0, {"out_binary_masks": [mask0]}, is_init_frame=True,
+        prompt_bbox=seed, last_known_bbox=seed, prev_lost=False,
+    )
+    adapt0, lost_a0, diag0, can_a0 = adapt_handler._postprocess_frame_outputs(
+        _sess(), frame_image0, {"out_binary_masks": [mask0]}, is_init_frame=True,
+        prompt_bbox=seed, last_known_bbox=seed, prev_lost=False,
+    )
+    assert not lost0 and not lost_a0
+    assert bbox_center(can_a0) == pytest.approx(bbox_center(can0), abs=1e-6)
+
+    state0 = {
+        "selection_prior_side": diag0["selection_prior_side_after"],
+        "selection_prior_age": diag0["selection_prior_age"],
+        "growth_confirmation_count": diag0["growth_confirmation_count"],
+        "emission_prior_side": diag0["emission_prior_side_after"],
+        "emission_hold_age": diag0["emission_hold_age"],
+    }
+    adapt1, _, diag1, can1_adapt = adapt_handler._postprocess_frame_outputs(
+        _sess(), frame_image1, {"out_binary_masks": [mask1]}, is_init_frame=False,
+        prompt_bbox=seed, last_known_bbox=can_a0, prev_lost=False,
+        latent_prior_state=state0,
+    )
+    _base1, _, _, can1_base = base_handler._postprocess_frame_outputs(
+        _sess(), frame_image1, {"out_binary_masks": [mask1]}, is_init_frame=False,
+        prompt_bbox=seed, last_known_bbox=can0, prev_lost=False,
+    )
+    assert bbox_center(can1_adapt) == pytest.approx(bbox_center(can1_base), abs=1e-3)
+    if diag1.get("adaptive_emitted"):
+        assert bbox_center(adapt1) == pytest.approx(bbox_center(can1_adapt), abs=1e-6)

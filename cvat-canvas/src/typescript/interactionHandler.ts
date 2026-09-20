@@ -89,6 +89,7 @@ export class InteractionHandlerImpl implements InteractionHandler {
             points_type: 'any',
             removalStrategy: 'any',
             appendCursorPositionAsPoint: false,
+            allowFrameChange: false,
         };
         this.container = adoptedContent;
         this.geometry = geometry;

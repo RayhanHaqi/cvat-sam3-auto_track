@@ -90,7 +90,7 @@ def _auto_track_diag_log(event_name: str, **fields: Any) -> None:
 
 
 SAM3_TRACKER_FUNCTION_ID = "meta-sam3-tracker-v4"
-SAM3_PRELOAD_CHUNK_CAP = 96
+SAM3_PRELOAD_CHUNK_CAP = 128
 SAM3_NUCLIO_MAX_REQUEST_BODY_BYTES = 268_435_456
 SAM3_PRELOAD_MAX_PAYLOAD_BYTES = 240 * 1024 * 1024
 SAM3_RAW_SOURCE_FRAME_RE = re.compile(r"frame_(\d+)\.png$", re.IGNORECASE)
@@ -422,6 +422,7 @@ class LambdaFunction:
         diag_meta = data.pop("_autoTrackDiag", None)
         invoke_started_at = None
         request_payload_bytes = None
+        sam3_init_timeline_diag = None
 
         def mandatory_arg(name: str) -> Any:
             try:
@@ -678,6 +679,7 @@ class LambdaFunction:
                             db_job,
                             frame_index,
                         )
+                        sam3_init_timeline_diag = timeline_diag
                         if not frame_indices:
                             raise ValidationError(
                                 "SAM3 preload produced zero frames",
@@ -786,6 +788,24 @@ class LambdaFunction:
                 )
 
         response = self.gateway.invoke(self, payload)
+
+        if (
+            self.id == SAM3_TRACKER_FUNCTION_ID
+            and "states" not in data
+            and sam3_init_timeline_diag
+            and isinstance(response, dict)
+            and isinstance(response.get("preload_summary"), dict)
+        ):
+            summary = dict(response["preload_summary"])
+            summary["stop_reason"] = sam3_init_timeline_diag.get("preloadStopReason")
+            summary["source_timeline_verified"] = sam3_init_timeline_diag.get(
+                "sourceTimelineVerified"
+            )
+            summary["preload_start_raw_index"] = sam3_init_timeline_diag.get(
+                "preloadStartRawIndex"
+            )
+            summary["preload_end_raw_index"] = sam3_init_timeline_diag.get("preloadEndRawIndex")
+            response["preload_summary"] = summary
 
         if _auto_track_diag_enabled() and self.kind == FunctionKind.TRACKER and invoke_started_at is not None:
             import time

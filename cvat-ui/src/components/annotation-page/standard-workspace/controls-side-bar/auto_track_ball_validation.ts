@@ -1,5 +1,17 @@
 /** Conservative geometry gates for CVAT Auto Track on ping_pong_ball (2D boxes only). */
 
+import type {
+    MinimalShape,
+    PreloadSummary,
+    PreloadTimelineEntry,
+    TrackerResults,
+} from 'cvat-core-wrapper';
+
+export const SAM3_V4_TRACKER_ID = 'meta-sam3-tracker-v4';
+
+/** PERF2: enabled unless explicitly disabled at build/runtime. */
+export const CVAT_UI_SAM3_G0_TIMELINE_ENABLED = process.env.CVAT_UI_SAM3_G0_TIMELINE !== '0';
+
 export type AutoTrackValidationVerdict = 'valid' | 'soft_invalid' | 'hard_invalid';
 
 export interface AutoTrackBallValidationConfig {
@@ -30,6 +42,15 @@ export interface AutoTrackBallHistory {
     lastValidPoints: number[] | null;
     previousCenter: [number, number] | null;
     consecutiveInvalidFrames: number;
+}
+
+export interface LossTerminationShapeSource {
+    autoTrackHistory?: AutoTrackBallHistory;
+    shapePoints: number[];
+}
+
+export interface LossTerminationObjectStateSource {
+    points: number[] | null;
 }
 
 export function boxCenter(points: number[]): [number, number] {
@@ -170,4 +191,123 @@ export function shouldConfirmAutoTrackLoss(
         return history.consecutiveInvalidFrames + 1 > config.maxConsecutiveInvalidFrames;
     }
     return false;
+}
+
+/** Finite positive-area rectangle; optional frame bounds when known. */
+export function isFinitePositiveBBox(
+    points: number[] | null | undefined,
+    frameWidth?: number,
+    frameHeight?: number,
+): points is number[] {
+    if (!points || points.length < 4) {
+        return false;
+    }
+    const [x1, y1, x2, y2] = points;
+    if (![x1, y1, x2, y2].every((value) => Number.isFinite(value))) {
+        return false;
+    }
+    if (x1 >= x2 || y1 >= y2) {
+        return false;
+    }
+    if (boxArea(points) <= 0) {
+        return false;
+    }
+    if (frameWidth !== undefined && (x1 < 0 || x2 > frameWidth)) {
+        return false;
+    }
+    if (frameHeight !== undefined && (y1 < 0 || y2 > frameHeight)) {
+        return false;
+    }
+    return true;
+}
+
+export function isShapeUnusable(
+    shape: MinimalShape | null | undefined,
+    frameWidth?: number,
+    frameHeight?: number,
+): boolean {
+    if (shape === null || shape === undefined) {
+        return true;
+    }
+    return !isFinitePositiveBBox(shape.points, frameWidth, frameHeight);
+}
+
+export function isExplicitSam3Loss(
+    trackerId: string,
+    response: Pick<TrackerResults, 'lost' | 'tracking_status'>,
+    state: { lost?: boolean } | null | undefined,
+    shape: MinimalShape | null | undefined,
+    frameWidth?: number,
+    frameHeight?: number,
+): boolean {
+    if (trackerId !== SAM3_V4_TRACKER_ID) {
+        return false;
+    }
+    if (response.tracking_status === 'preload_exhausted') {
+        return false;
+    }
+    const explicitLoss = response.lost === true || state?.lost === true;
+    if (!explicitLoss) {
+        return false;
+    }
+    return isShapeUnusable(shape, frameWidth, frameHeight);
+}
+
+export function getLossTerminationPoints(
+    trackedShape: LossTerminationShapeSource,
+    objectState: LossTerminationObjectStateSource,
+    frameWidth?: number,
+    frameHeight?: number,
+): number[] | null {
+    const fromHistory = trackedShape.autoTrackHistory?.lastValidPoints;
+    if (isFinitePositiveBBox(fromHistory, frameWidth, frameHeight)) {
+        return [...fromHistory];
+    }
+    if (isFinitePositiveBBox(trackedShape.shapePoints, frameWidth, frameHeight)) {
+        return [...trackedShape.shapePoints];
+    }
+    if (isFinitePositiveBBox(objectState.points, frameWidth, frameHeight)) {
+        return [...objectState.points];
+    }
+    return null;
+}
+
+export function isPreloadTimelineResponse(
+    response: TrackerResults,
+): response is TrackerResults & { preload_timeline: PreloadTimelineEntry[]; preload_summary: PreloadSummary } {
+    return Array.isArray(response.preload_timeline) &&
+        response.preload_timeline.length > 0 &&
+        typeof response.preload_summary === 'object' &&
+        response.preload_summary !== null;
+}
+
+export function validatePreloadTimeline(
+    response: TrackerResults,
+): { valid: true; timeline: PreloadTimelineEntry[]; summary: PreloadSummary } | { valid: false; reason: string } {
+    if (!isPreloadTimelineResponse(response)) {
+        return { valid: false, reason: 'missing_preload_timeline' };
+    }
+    const { preload_timeline: timeline, preload_summary: summary } = response;
+    if (timeline.length !== summary.preloaded_count) {
+        return { valid: false, reason: 'timeline_length_mismatch' };
+    }
+    for (let i = 0; i < timeline.length; i++) {
+        const entry = timeline[i];
+        if (entry.relative_frame !== i) {
+            return { valid: false, reason: 'relative_frame_gap' };
+        }
+        if (entry.frame !== summary.base_frame + i) {
+            return { valid: false, reason: 'absolute_frame_mismatch' };
+        }
+        if (entry.bbox_status === 'valid') {
+            if (!entry.points || entry.points.length !== 4 || !isFinitePositiveBBox(entry.points)) {
+                return { valid: false, reason: 'invalid_valid_entry_points' };
+            }
+        }
+    }
+    const expectedUntil = summary.base_frame + summary.preloaded_count - 1;
+    if (summary.preloaded_until_frame !== expectedUntil) {
+        return { valid: false, reason: 'preloaded_until_mismatch' };
+    }
+    return { valid: true, timeline, summary };
 }

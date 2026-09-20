@@ -34,12 +34,43 @@ export interface MinimalShape {
     points: number[];
 }
 
+export type PreloadBboxStatus = 'valid' | 'lost' | 'skipped';
+
+export interface PreloadTimelineEntry {
+    frame: number;
+    relative_frame: number;
+    bbox_status: PreloadBboxStatus;
+    points: number[] | null;
+    lost: boolean;
+    source_raw_index?: number | null;
+}
+
+export type PreloadStopReason =
+    | 'source_timeline_gap'
+    | 'job_end'
+    | 'chunk_cap'
+    | 'continuity_unverified'
+    | null;
+
+export interface PreloadSummary {
+    base_frame: number;
+    preloaded_count: number;
+    preloaded_until_frame: number;
+    stop_reason?: PreloadStopReason;
+    source_timeline_verified?: boolean;
+    preload_start_raw_index?: number | null;
+    preload_end_raw_index?: number | null;
+}
+
 export interface TrackerResults {
     states: any[];
     shapes: (MinimalShape | null)[];
+    lost?: boolean;
     tracking_status?: string;
     tracking_stop_reason?: string;
     preloaded_until_frame?: number;
+    preload_timeline?: PreloadTimelineEntry[];
+    preload_summary?: PreloadSummary;
 }
 
 class LambdaManager {

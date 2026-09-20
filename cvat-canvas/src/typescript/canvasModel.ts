@@ -5,6 +5,7 @@
 
 import consts from './consts';
 import { MasterImpl } from './master';
+import { interactionAllowsFrameChange } from './frame-navigation';
 
 export interface Size {
     width: number;
@@ -138,6 +139,8 @@ export interface InteractionData {
         points_type?: 'any' | 'positive' | 'negative'; // default is any
         removalStrategy?: 'any' | 'last'; // default is any
         appendCursorPositionAsPoint?: boolean; // default is false
+        // Opt-in frame navigation while this interaction is active (e.g. rally seed draw).
+        allowFrameChange?: boolean; // default is false
     };
 }
 
@@ -1016,8 +1019,10 @@ export class CanvasModelImpl extends MasterImpl implements CanvasModel {
     }
 
     public isAbleToChangeFrame(): boolean {
-        const isUnable = [Mode.SLICE, Mode.DRAG, Mode.EDIT, Mode.RESIZE, Mode.INTERACT].includes(this.data.mode) ||
-            (this.data.mode === Mode.DRAW && typeof this.data.drawData.redraw === 'number');
+        const isUnable = [Mode.SLICE, Mode.DRAG, Mode.EDIT, Mode.RESIZE].includes(this.data.mode) ||
+            (this.data.mode === Mode.DRAW && typeof this.data.drawData.redraw === 'number') ||
+            (this.data.mode === Mode.INTERACT &&
+                !interactionAllowsFrameChange(this.data.interactionData));
 
         return !isUnable;
     }

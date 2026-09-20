@@ -17,6 +17,7 @@ from diagnostics import bbox_summary, enabled as diag_enabled, log_frame_record,
 from sam3.model_builder import build_sam3_predictor
 
 MAX_SESSIONS = 32
+SAM3_PRELOAD_CHUNK_CAP = 128
 VALID_PROMPT_MODES = ("box", "text_box", "text")
 VALID_OUTPUT_POLICIES = (
     "sam_box",
@@ -1431,6 +1432,59 @@ def log_adaptive_scale_diagnostics(diag, *, relative_frame, diag_meta=None):
     log_frame_record(record)
 
 
+def log_lost_frame_diagnostics(
+    *,
+    reason,
+    relative_frame,
+    sess,
+    outputs,
+    prompt_bbox,
+    last_known_bbox,
+    raw_sam_bbox,
+    refined_bbox,
+    config,
+    diag_meta=None,
+):
+    """Read-only diagnostics for the first unusable/lost frame. No payloads."""
+    if not diag_enabled():
+        return
+    corner_deltas = None
+    if raw_sam_bbox is not None and refined_bbox is not None:
+        try:
+            corner_deltas = [
+                float(refined_bbox[i]) - float(raw_sam_bbox[i]) for i in range(4)
+            ]
+        except Exception:
+            corner_deltas = None
+    record = {
+        "event": "lost_frame",
+        "reason": reason,
+        "relativeFrame": relative_frame,
+        "rawSamBbox": bbox_summary(raw_sam_bbox),
+        "refinedBbox": bbox_summary(refined_bbox),
+        "promptBbox": bbox_summary(prompt_bbox),
+        "lastKnownBbox": bbox_summary(last_known_bbox),
+        "refinedNearPrompt": _bboxes_near(refined_bbox, prompt_bbox),
+        "refinedNearLastKnown": _bboxes_near(refined_bbox, last_known_bbox),
+        "lastKnownNearPrompt": _bboxes_near(last_known_bbox, prompt_bbox),
+        "refineCornerDeltas": corner_deltas,
+        "irRefineEnabled": bool(getattr(config, "ir_refine_enabled", False)),
+        "irStopOnMissing": bool(getattr(config, "ir_stop_on_missing", False)),
+        "outputPolicy": getattr(config, "output_policy", None),
+        "outputs": summarize_outputs(
+            outputs, sess.get("image_height"), sess.get("image_width")
+        ),
+    }
+    if diag_meta:
+        record.update({
+            "sessionId": diag_meta.get("sessionId"),
+            "jobFrameIndex": diag_meta.get("jobFrameIndex"),
+            "requestId": diag_meta.get("requestId"),
+            "requestType": diag_meta.get("requestType"),
+        })
+    log_frame_record(record)
+
+
 class SessionStaleError(Exception):
     """Raised when CVAT returns a session_key the worker no longer holds."""
 
@@ -1521,6 +1575,48 @@ def _sam_bbox_temporally_consistent(sam_bbox, previous_bbox):
     sam_cx, sam_cy = bbox_center(sam_bbox)
     temporal_disp = ((sam_cx - prev_cx) ** 2 + (sam_cy - prev_cy) ** 2) ** 0.5
     return temporal_disp <= max_temporal_disp
+
+
+def serialize_preload_timeline(cache, base_frame):
+    """Build G0 preload_timeline[] from frame_cache (bbox/lost only, no secrets)."""
+    timeline = []
+    past_first_loss = False
+    for relative_frame in range(len(cache)):
+        entry = cache.get(relative_frame)
+        if entry is None:
+            raise ValidationError(f"SAM3 cache missing relative frame {relative_frame}")
+        lost = bool(entry.get("lost"))
+        bbox = entry.get("bbox")
+        if lost or bbox is None:
+            if past_first_loss:
+                bbox_status = "skipped"
+            else:
+                bbox_status = "lost"
+                past_first_loss = True
+            points = None
+        else:
+            bbox_status = "valid"
+            points = [float(v) for v in bbox]
+        timeline.append({
+            "frame": int(base_frame) + int(relative_frame),
+            "relative_frame": int(relative_frame),
+            "bbox_status": bbox_status,
+            "points": points,
+            "lost": lost or bbox is None,
+        })
+    return timeline
+
+
+def serialize_preload_summary(sess):
+    base_frame = int(sess["base_frame"])
+    preloaded_count = int(sess["preloaded_count"])
+    return {
+        "base_frame": base_frame,
+        "preloaded_count": preloaded_count,
+        "preloaded_until_frame": int(
+            sess.get("preloaded_until_frame", base_frame + preloaded_count - 1)
+        ),
+    }
 
 
 class ModelHandler:
@@ -1686,6 +1782,10 @@ class ModelHandler:
         count = int(preload_count)
         if count <= 0:
             raise ValidationError("preload_frame_count must be positive")
+        if count > SAM3_PRELOAD_CHUNK_CAP:
+            raise ValidationError(
+                f"preload_frame_count {count} exceeds SAM3_PRELOAD_CHUNK_CAP {SAM3_PRELOAD_CHUNK_CAP}"
+            )
         if not preload_images_b64 or len(preload_images_b64) < count:
             raise ValidationError("preload_images length does not match preload_frame_count")
 
@@ -1743,13 +1843,16 @@ class ModelHandler:
     def _propagate_full_chunk(self, sess, preload_count):
         outputs_by_frame = {}
         max_track = max(int(preload_count) - 1, 0)
-        for response in self.predictor.handle_stream_request(request={
+        request = {
             "type": "propagate_in_video",
             "session_id": sess["session_id"],
             "start_frame_index": 0,
             "max_frame_num_to_track": max_track,
             "propagation_direction": "forward",
-        }):
+        }
+        if self.config.prompt_mode == "box":
+            request["force_tracker_propagation"] = True
+        for response in self.predictor.handle_stream_request(request=request):
             frame_idx = response.get("frame_index")
             if frame_idx is not None:
                 outputs_by_frame[int(frame_idx)] = response.get("outputs")
@@ -1769,8 +1872,11 @@ class ModelHandler:
         diag_meta=None,
         previous_accepted_target_side=None,
         latent_prior_state=None,
+        lost_reason_out=None,
     ):
         if prev_lost:
+            if lost_reason_out is not None:
+                lost_reason_out.append("sticky_prev_lost")
             return None, True, None, None
 
         reference_bbox = prompt_bbox if is_init_frame else last_known_bbox
@@ -1786,10 +1892,26 @@ class ModelHandler:
         else:
             bbox = self._output_to_bbox(outputs, sess, reference_bbox)
 
+        raw_sam_bbox = bbox
+
         if bbox is None:
             if is_init_frame:
                 bbox = prompt_bbox
             else:
+                log_lost_frame_diagnostics(
+                    reason="output_none",
+                    relative_frame=relative_frame,
+                    sess=sess,
+                    outputs=outputs,
+                    prompt_bbox=prompt_bbox,
+                    last_known_bbox=last_known_bbox,
+                    raw_sam_bbox=None,
+                    refined_bbox=None,
+                    config=self.config,
+                    diag_meta=diag_meta,
+                )
+                if lost_reason_out is not None:
+                    lost_reason_out.append("output_none")
                 return None, True, None, None
 
         bbox = self._maybe_refine_bbox(
@@ -1801,6 +1923,20 @@ class ModelHandler:
             if is_init_frame:
                 bbox = prompt_bbox
             else:
+                log_lost_frame_diagnostics(
+                    reason="refine_none",
+                    relative_frame=relative_frame,
+                    sess=sess,
+                    outputs=outputs,
+                    prompt_bbox=prompt_bbox,
+                    last_known_bbox=last_known_bbox,
+                    raw_sam_bbox=raw_sam_bbox,
+                    refined_bbox=None,
+                    config=self.config,
+                    diag_meta=diag_meta,
+                )
+                if lost_reason_out is not None:
+                    lost_reason_out.append("refine_none")
                 return None, True, None, None
 
         if (
@@ -1810,6 +1946,20 @@ class ModelHandler:
             and _bboxes_near(bbox, prompt_bbox)
             and not _bboxes_near(last_known_bbox, prompt_bbox)
         ):
+            log_lost_frame_diagnostics(
+                reason="false_relock",
+                relative_frame=relative_frame,
+                sess=sess,
+                outputs=outputs,
+                prompt_bbox=prompt_bbox,
+                last_known_bbox=last_known_bbox,
+                raw_sam_bbox=raw_sam_bbox,
+                refined_bbox=bbox,
+                config=self.config,
+                diag_meta=diag_meta,
+            )
+            if lost_reason_out is not None:
+                lost_reason_out.append("false_relock")
             return None, True, None, None
 
         canonical_tracking_bbox = list(bbox)
@@ -1908,6 +2058,10 @@ class ModelHandler:
             prev_accepted_target_side = None
             prev_latent_prior_state = None
             prompt_bbox = sess["prompt_bbox"]
+            lost_reason_out = []
+            lost_count = 0
+            first_lost_relative_frame = None
+            first_lost_reason = None
 
             for relative_frame in range(int(preload_count)):
                 frame_image = self._load_preloaded_frame(sess, relative_frame)
@@ -1926,10 +2080,17 @@ class ModelHandler:
                         relative_frame=relative_frame,
                         previous_accepted_target_side=prev_accepted_target_side,
                         latent_prior_state=prev_latent_prior_state,
+                        lost_reason_out=lost_reason_out,
                     )
                 )
                 cache[relative_frame] = {"bbox": emitted_bbox, "lost": lost}
                 if lost:
+                    lost_count += 1
+                    if first_lost_relative_frame is None:
+                        first_lost_relative_frame = relative_frame
+                        first_lost_reason = (
+                            lost_reason_out[-1] if lost_reason_out else None
+                        )
                     prev_lost = True
                     prev_bbox = None
                     prev_accepted_target_side = None
@@ -1948,6 +2109,18 @@ class ModelHandler:
                     ):
                         prev_accepted_target_side = adaptive_diag.get("accepted_target_side")
 
+            if diag_enabled():
+                log_frame_record({
+                    "event": "chunk_lost_summary",
+                    "relativeFrame": first_lost_relative_frame,
+                    "chunkLength": int(preload_count),
+                    "preloadCount": int(preload_count),
+                    "validCount": int(preload_count) - lost_count,
+                    "lostCount": lost_count,
+                    "firstLostRelativeFrame": first_lost_relative_frame,
+                    "firstLostReason": first_lost_reason,
+                })
+
             sess["frame_cache"] = cache
             sess["cache_ready"] = True
             return cache
@@ -1965,12 +2138,13 @@ class ModelHandler:
         preload_base_frame=None,
         preload_frame_count=None,
         preload_payload_bytes=None,
+        include_g0_extras=False,
     ):
         shapes = shapes or []
         prev_state = states[0] if states and isinstance(states[0], dict) else {}
 
         if preload_images is not None:
-            return self._infer_preload_init(
+            shapes_out, states_out, g0_extras = self._infer_preload_init(
                 shapes,
                 states,
                 diag_meta=diag_meta,
@@ -1980,14 +2154,20 @@ class ModelHandler:
                 preload_frame_count=preload_frame_count,
                 preload_payload_bytes=preload_payload_bytes,
             )
+            if include_g0_extras:
+                return shapes_out, states_out, g0_extras
+            return shapes_out, states_out
 
         if isinstance(prev_state, dict) and prev_state.get("preloaded_count") is not None:
-            return self._infer_preload_cached_track(
+            shapes_out, states_out = self._infer_preload_cached_track(
                 states,
                 diag_meta=diag_meta,
                 frame_index=frame_index,
                 preload_payload_bytes=preload_payload_bytes,
             )
+            if include_g0_extras:
+                return shapes_out, states_out, None
+            return shapes_out, states_out
 
         raise ValidationError(
             "SAM3 tracker requires server-built preload_images on init; re-seed tracking"
@@ -2062,7 +2242,11 @@ class ModelHandler:
                 "totalSamHandlerMs": (time.perf_counter() - batch_started) * 1000.0,
             })
 
-        return [bbox], [out_state]
+        g0_extras = {
+            "preload_timeline": serialize_preload_timeline(cache, base_frame),
+            "preload_summary": serialize_preload_summary(sess),
+        }
+        return [bbox], [out_state], g0_extras
 
     def _infer_preload_cached_track(
         self,

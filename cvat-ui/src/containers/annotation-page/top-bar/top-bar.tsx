@@ -36,6 +36,7 @@ import {
     ActiveControl, CombinedState, FrameSpeed, NavigationType, ToolsBlockerState, Workspace,
 } from 'reducers';
 import isAbleToChangeFrame from 'utils/is-able-to-change-frame';
+import { findNextRallyFrame, findPrevRallyFrame } from 'utils/rally-navigation';
 import { KeyMap } from 'utils/mousetrap-react';
 import { switchToolsBlockerState } from 'actions/settings-actions';
 import { writeLatestFrame } from 'utils/remember-latest-frame';
@@ -50,6 +51,7 @@ interface StateToProps {
     frameIsDeleted: boolean;
     frameNumber: number;
     frameFilename: string;
+    meta: FramesMetaData | null;
     frameStep: number;
     frameSpeed: FrameSpeed;
     frameDelay: number;
@@ -167,6 +169,7 @@ function mapStateToProps(state: CombinedState): StateToProps {
         saving,
         frameNumber,
         frameFilename,
+        meta,
         jobInstance: jobInstance as Job,
         undoAction: history.undo.length ? history.undo[history.undo.length - 1][0] : undefined,
         redoAction: history.redo.length ? history.redo[history.redo.length - 1][0] : undefined,
@@ -420,14 +423,45 @@ class AnnotationTopBarContainer extends React.PureComponent<Props> {
     private onBackward = async (): Promise<void> => {
         const {
             frameNumber, frameStep, jobInstance, playing,
-            onSwitchPlay, showDeletedFrames,
+            onSwitchPlay, showDeletedFrames, meta,
         } = this.props;
 
-        const newFrame = await jobInstance.frames.search(
-            { notDeleted: !showDeletedFrames, offset: frameStep },
-            Math.max(jobInstance.startFrame, frameNumber - 1),
-            jobInstance.startFrame,
-        );
+        // The previous rally start is the nearest source frame before the current
+        // one whose token is not the previous token + 1, skipping the current
+        // frame when it is itself a start. Unmappable or unparseable filenames
+        // fall back to the regular step-based navigation.
+        let targetFrame: number | null = null;
+        if (meta !== null) {
+            const dataFrameNumbers = meta.getDataFrameNumbers();
+            const currentIndex = dataFrameNumbers.indexOf(frameNumber);
+            if (currentIndex !== -1 && meta.frames.length === dataFrameNumbers.length) {
+                const target = findPrevRallyFrame(
+                    meta.frames.map((frame) => frame.name),
+                    currentIndex,
+                );
+                if (target.kind !== 'fallback') {
+                    targetFrame = dataFrameNumbers[target.index];
+                }
+            }
+        }
+
+        let newFrame: number | null;
+        if (targetFrame === null) {
+            newFrame = await jobInstance.frames.search(
+                { notDeleted: !showDeletedFrames, offset: frameStep },
+                Math.max(jobInstance.startFrame, frameNumber - 1),
+                jobInstance.startFrame,
+            );
+        } else {
+            // Resolve to the first visible frame at or after the rally start,
+            // bounded before the current frame so a deleted start stays within
+            // the intended rally instead of leaking into the previous one.
+            newFrame = await jobInstance.frames.search(
+                { notDeleted: !showDeletedFrames },
+                targetFrame,
+                Math.max(targetFrame, frameNumber - 1),
+            );
+        }
 
         if (newFrame !== frameNumber && newFrame !== null) {
             if (playing) {
@@ -501,14 +535,54 @@ class AnnotationTopBarContainer extends React.PureComponent<Props> {
     private onForward = async (): Promise<void> => {
         const {
             frameNumber, frameStep, jobInstance, playing,
-            onSwitchPlay, showDeletedFrames,
+            onSwitchPlay, showDeletedFrames, meta,
         } = this.props;
 
-        const newFrame = await jobInstance.frames.search(
-            { notDeleted: !showDeletedFrames, offset: frameStep },
-            Math.min(jobInstance.stopFrame, frameNumber + 1),
-            jobInstance.stopFrame,
-        );
+        // The next rally start is the first source frame after the current one
+        // whose trailing numeric token is not previous token + 1. When filenames
+        // cannot be mapped to frame numbers (e.g. a single-name video job) or
+        // cannot be parsed, fall back to the regular step-based navigation.
+        let targetFrame: number | null = null;
+        let targetIsGap = false;
+        if (meta !== null) {
+            const dataFrameNumbers = meta.getDataFrameNumbers();
+            const currentIndex = dataFrameNumbers.indexOf(frameNumber);
+            if (currentIndex !== -1 && meta.frames.length === dataFrameNumbers.length) {
+                const target = findNextRallyFrame(
+                    meta.frames.map((frame) => frame.name),
+                    currentIndex,
+                );
+                if (target.kind !== 'fallback') {
+                    targetFrame = dataFrameNumbers[target.index];
+                    targetIsGap = target.kind === 'gap';
+                }
+            }
+        }
+
+        let newFrame: number | null;
+        if (targetFrame === null) {
+            newFrame = await jobInstance.frames.search(
+                { notDeleted: !showDeletedFrames, offset: frameStep },
+                Math.min(jobInstance.stopFrame, frameNumber + 1),
+                jobInstance.stopFrame,
+            );
+        } else if (targetIsGap) {
+            // A rally gap resolves forward from the target, even at the final index.
+            newFrame = await jobInstance.frames.search(
+                { notDeleted: !showDeletedFrames },
+                targetFrame,
+                jobInstance.stopFrame,
+            );
+        } else {
+            // No later rally gap: target the last frame. Search backwards like
+            // onLastFrame so a deleted+hidden stop frame resolves to the last
+            // visible frame instead of a no-op.
+            newFrame = await jobInstance.frames.search(
+                { notDeleted: !showDeletedFrames },
+                targetFrame,
+                frameNumber,
+            );
+        }
 
         if (newFrame !== frameNumber && newFrame !== null) {
             if (playing) {
