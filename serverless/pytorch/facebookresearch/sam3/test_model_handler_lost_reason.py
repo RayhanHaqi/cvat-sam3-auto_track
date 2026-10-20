@@ -180,3 +180,32 @@ def test_no_diagnostics_when_disabled(monkeypatch):
 
     assert bbox is None and lost is True
     assert records == []
+
+
+def test_false_relock_near_last_known_stays_valid(captured):
+    """Task-25 rally-5 frame 1: the real SAM box must not be called a relock.
+
+    The prompt is a hand-drawn seed, so its corners sit a few pixels off the ball
+    and the accepted box is only 6-7px wide. A relock needs the accepted box to
+    have moved away, not a 2px corner match.
+    """
+    handler = _handler(Sam3Config(ir_refine_enabled=False, output_policy="mask_bbox"))
+    candidate = [439.0, 92.0, 446.0, 99.0]
+    handler._output_to_bbox = lambda *_a, **_k: list(candidate)
+    handler._maybe_refine_bbox = lambda _img, box, previous_bbox=None: list(box)
+    sess = {"image_height": 200, "image_width": 200}
+
+    bbox, lost, *_ = handler._postprocess_frame_outputs(
+        sess,
+        _dark_frame(),
+        {"out_boxes_xywh": None},
+        is_init_frame=False,
+        prompt_bbox=[437.8822631982039, 91.1680722255278, 445.58068684644604, 100.00700308091655],
+        last_known_bbox=[437.0, 92.0, 443.0, 98.0],
+        prev_lost=False,
+        relative_frame=1,
+    )
+
+    assert lost is False
+    assert bbox is not None
+    assert captured == []

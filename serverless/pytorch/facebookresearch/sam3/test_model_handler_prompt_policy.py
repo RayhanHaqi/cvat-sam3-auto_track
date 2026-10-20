@@ -23,7 +23,7 @@ select_bbox_from_outputs = _mod.select_bbox_from_outputs
 def test_load_sam3_config_defaults_to_box_mode():
     cfg = load_sam3_config({})
     assert cfg.prompt_mode == "box"
-    assert cfg.output_policy == "sam_box"
+    assert cfg.output_policy == "motion_blur_center_box"
     assert cfg.text_prompt == "ping pong ball"
 
 

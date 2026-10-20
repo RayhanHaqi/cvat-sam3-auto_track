@@ -59,6 +59,23 @@ do
             SAM3_TEXT_PROMPT \
             SAM3_OUTPUT_POLICY \
             SAM3_OUTPUT_PROB_THRESH \
+            SAM3_DETECTION_SCORE_THRESHOLD \
+            SAM3_DETECTION_MAX_PROMPT_DISTANCE_PX \
+            SAM3_RECOVER_AFTER_MISS \
+            SAM3_EDGE_HOLD \
+            SAM3_UI_GATE_CLAMP \
+            SAM3_TRAILING_HOLD_FRAMES \
+            SAM3_RECOVER_MAX_GAP \
+            SAM3_RESEED_AFTER_MISS \
+            SAM3_RESEED_MAX_ATTEMPTS \
+            SAM3_PROMPT_BOX_SCALE \
+            SAM3_ROD_MASK_ANCHOR \
+            SAM3_ROD_MASK_MAX_WIDTH \
+            SAM3_ROD_MASK_MIN_ASPECT \
+            SAM3_ROD_BLOB_REANCHOR \
+            SAM3_ROD_BLOB_SEARCH_PX \
+            SAM3_ROD_BLOB_MARGIN \
+            SAM3_ROD_MASK_LOLLIPOP_RATIO \
             SAM3_IR_REFINE \
             SAM3_IR_STOP_ON_MISSING \
             SAM3_RETURN_G0_TIMELINE \
@@ -72,7 +89,13 @@ do
             SAM3_ADAPTIVE_EXPANSION_ONLY \
             SAM3_ADAPTIVE_SELECTION_PRIOR_MAX_AGE_FRAMES \
             SAM3_ADAPTIVE_EMISSION_HOLD_MAX_AGE_FRAMES \
-            SAM3_ADAPTIVE_GROWTH_CONFIRMATIONS
+            SAM3_ADAPTIVE_GROWTH_CONFIRMATIONS \
+            SAM3_MOTION_BLUR_MIN_EIGEN_RATIO \
+            SAM3_MOTION_BLUR_MIN_MASK_PIXELS \
+            SAM3_MOTION_BLUR_TARGET_FRACTION \
+            SAM3_MOTION_BLUR_INTENSITY_CENTER \
+            SAM3_MOTION_BLUR_STABILIZED_DIAMETER \
+            SAM3_MOTION_BLUR_DIAMETER_WINDOW
         do
             if [ -n "${!var:-}" ]; then
                 deploy_env+=(--env "$var=${!var}")

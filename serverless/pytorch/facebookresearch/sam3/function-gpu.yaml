@@ -1,6 +1,6 @@
 metadata:
   name: meta-sam3-tracker-v4
-  namespace: cvat
+  namespace: nuclio
   annotations:
     name: SAM 3 Video Tracker v4
     type: tracker
@@ -11,7 +11,7 @@ metadata:
       ]
 
 spec:
-  description: SAM 3 single-object video tracker
+  description: SAM 3 single-object video tracker (C, mid-exposure mask geometry)
   runtime: 'python:3.10'
   handler: main:handler
   eventTimeout: 120s
@@ -28,9 +28,55 @@ spec:
     - name: SAM3_TEXT_PROMPT
       value: ping pong ball
     - name: SAM3_OUTPUT_POLICY
-      value: sam_box
+      value: motion_blur_center_box
+    - name: SAM3_MOTION_BLUR_TARGET_FRACTION
+      value: "0.5"
+    - name: SAM3_MOTION_BLUR_MIN_EIGEN_RATIO
+      value: "1.44"
+    - name: SAM3_MOTION_BLUR_MIN_MASK_PIXELS
+      value: "6"
+    - name: SAM3_MOTION_BLUR_INTENSITY_CENTER
+      value: "0"
+    - name: SAM3_MOTION_BLUR_STABILIZED_DIAMETER
+      value: "0"
+    - name: SAM3_MOTION_BLUR_DIAMETER_WINDOW
+      value: "2"
     - name: SAM3_OUTPUT_PROB_THRESH
       value: "0.0"
+    - name: SAM3_DETECTION_SCORE_THRESHOLD
+      value: "0.5"
+    - name: SAM3_DETECTION_MAX_PROMPT_DISTANCE_PX
+      value: "0"
+    - name: SAM3_RECOVER_AFTER_MISS
+      value: "0"
+    - name: SAM3_EDGE_HOLD
+      value: "0"
+    - name: SAM3_UI_GATE_CLAMP
+      value: "0"
+    - name: SAM3_TRAILING_HOLD_FRAMES
+      value: "0"
+    - name: SAM3_RECOVER_MAX_GAP
+      value: "2"
+    - name: SAM3_RESEED_AFTER_MISS
+      value: "0"
+    - name: SAM3_RESEED_MAX_ATTEMPTS
+      value: "2"
+    - name: SAM3_PROMPT_BOX_SCALE
+      value: "1.0"
+    - name: SAM3_ROD_MASK_ANCHOR
+      value: "0"
+    - name: SAM3_ROD_MASK_MAX_WIDTH
+      value: "3"
+    - name: SAM3_ROD_MASK_MIN_ASPECT
+      value: "2.0"
+    - name: SAM3_ROD_BLOB_REANCHOR
+      value: "0"
+    - name: SAM3_ROD_BLOB_SEARCH_PX
+      value: "24"
+    - name: SAM3_ROD_BLOB_MARGIN
+      value: "15.0"
+    - name: SAM3_ROD_MASK_LOLLIPOP_RATIO
+      value: "2.0"
     - name: SAM3_IR_REFINE
       value: "1"
     - name: SAM3_IR_STOP_ON_MISSING
@@ -41,7 +87,7 @@ spec:
       value: "1"
 
   build:
-    image: cvat.meta.sam3.tracker:v4-box-force-tracker-repair-20260920
+    image: cvat.meta.sam3.tracker:v4-darkball-20261019
     baseImage: nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
     directives:
       preCopy:

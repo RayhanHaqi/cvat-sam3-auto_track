@@ -14,6 +14,17 @@ import torch
 from PIL import Image
 
 from diagnostics import bbox_summary, enabled as diag_enabled, log_frame_record, summarize_outputs
+from motion_blur import (
+    MOTION_BLUR_MIN_EIGEN_RATIO_DEFAULT,
+    MOTION_BLUR_MIN_MASK_PIXELS_DEFAULT,
+    MOTION_BLUR_TARGET_FRACTION_DEFAULT,
+    estimate_motion_blur_center,
+    intensity_weighted_centroid,
+    mask_centroid,
+    mask_points,
+    median_sharp_diameter,
+    motion_blur_report_row,
+)
 from sam3.model_builder import build_sam3_predictor
 
 MAX_SESSIONS = 32
@@ -26,6 +37,7 @@ VALID_OUTPUT_POLICIES = (
     "adaptive_component_square_box",
     "adaptive_component_deadband_box",
     "adaptive_component_latent_prior_box",
+    "motion_blur_center_box",
 )
 ADAPTIVE_COMPONENT_POLICIES = frozenset({
     "adaptive_component_square_box",
@@ -48,8 +60,35 @@ ADAPTIVE_MIN_SIDE_PX = 4
 ADAPTIVE_MAX_GROWTH_RATIO = 1.30
 ADAPTIVE_MAX_SHRINK_RATIO = 0.75
 DEFAULT_TEXT_PROMPT = "ping pong ball"
+DEFAULT_OUTPUT_POLICY = "motion_blur_center_box"
 DEFAULT_OUTPUT_PROB_THRESH = 0.25
+# SAM3 video model hard-codes the VG detection gate to 0.5; this is the
+# handler override for the dark-ball calibration.
+DEFAULT_DETECTION_SCORE_THRESHOLD = 0.5
+# Maximum emitted-centre displacement (in box sides) that the edge hold
+# tolerates before it holds the last accepted box.
+EDGE_HOLD_MAX_DISP_SIDES = 4.0
+# UI ball-geometry staging envelope (mirror of AUTO_TRACK_BALL_VALIDATION_CONFIG
+# soft limits). Emitted boxes are clamped inside these so the rally segment is
+# not discarded by the frontend gate on launch-acceleration or frame-exit
+# frames. Margins are kept inside the soft thresholds.
+UI_GATE_CLAMP_MAX_AREA_RATIO = 2.4
+UI_GATE_CLAMP_MIN_AREA_RATIO = 0.4
+UI_GATE_CLAMP_MAX_DISP_DIAGONALS = 2.4
+UI_GATE_CLAMP_MAX_VELOCITY_RESIDUAL = 3.5
+UI_GATE_EMIT_WINDOW = 8
+# Frontend rally staging envelope (mirrored): soft limits count violations,
+# hard limits discard the segment; two soft signals in one frame are hard.
+UI_GATE_SOFT_AREA_MIN_RATIO = 0.35
+UI_GATE_SOFT_AREA_MAX_RATIO = 2.5
+UI_GATE_HARD_AREA_MAX_RATIO = 4.0
+UI_GATE_HARD_AREA_MIN_RATIO = UI_GATE_SOFT_AREA_MIN_RATIO / 2.0
+UI_GATE_SOFT_MAX_DISP_SCALE = 2.5
+UI_GATE_HARD_MAX_DISP_SCALE = 5.0
+UI_GATE_MAX_VELOCITY_RESIDUAL = 4.0
 MIN_BOX_SIDE_PX = 4
+ROD_BLOB_MIN_PIXELS = 3
+ROD_BLOB_MAX_PIXELS = 150
 IR_REFINE_BRIGHT_PERCENTILE = 88
 IR_REFINE_ROI_SCALE = 1.5
 IR_REFINE_MIN_ROI_MARGIN_PX = 24
@@ -59,6 +98,10 @@ IR_REFINE_MAX_AREA_RATIO = 3.0
 IR_REFINE_MIN_CIRCULARITY = 0.25
 IR_REFINE_MAX_ASPECT_RATIO = 2.5
 IR_REFINE_MAX_TEMPORAL_DISP_RATIO = 2.5
+# A false relock must snap back onto the prompt while the accepted box has moved
+# away from it. Judged relative to the box side: a 2px corner test condemns a
+# hand-drawn prompt on a 7px ball, where 3px is ordinary motion.
+FALSE_RELOCK_MAX_DISP_RATIO = 1.0
 IR_REFINE_SUPPORT_CONTRAST_FLOOR = 8.0
 IR_REFINE_MIN_SEED_PIXELS = 3
 
@@ -67,8 +110,50 @@ IR_REFINE_MIN_SEED_PIXELS = 3
 class Sam3Config:
     prompt_mode: str = "box"
     text_prompt: str = DEFAULT_TEXT_PROMPT
-    output_policy: str = "sam_box"
+    output_policy: str = DEFAULT_OUTPUT_POLICY
     output_prob_thresh: float = DEFAULT_OUTPUT_PROB_THRESH
+    # Dark-ball calibration: SAM3's VG detector gate is hard-coded to 0.5 in
+    # the image (model_builder.build_sam3_video_model). Lowering it lets the
+    # low-contrast dark ball on the launcher post be detected at the seed frame.
+    detection_score_threshold: float = DEFAULT_DETECTION_SCORE_THRESHOLD
+    # Optional fail-closed distance gate for candidate selection (0 disables).
+    detection_max_prompt_distance_px: float = 0.0
+    # Re-acquire after a single-frame miss instead of sticky loss.
+    recover_after_miss: bool = False
+    # Fail-soft near image borders: hold the last accepted box when an
+    # edge-clamped box would jump far from it.
+    edge_hold_enabled: bool = False
+    # Clamp emitted boxes inside the UI geometry envelope so the rally segment
+    # is not discarded by the frontend gate.
+    ui_gate_clamp: bool = False
+    # Hold the last known box for a miss in the last N preloaded frames (no
+    # future frame can re-acquire there; avoids discarding the whole segment).
+    trailing_hold_frames: int = 0
+    # Fill up to N consecutive missing frames with linearly interpolated
+    # boxes (the UI stops the segment on a lost frame and needs a box on every
+    # frame). Longer gaps keep today's loss behaviour.
+    recover_max_gap: int = 2
+    # Re-prompt the tracker with the last accepted box when the model loses the
+    # object for more than recover_max_gap frames, then re-propagate from the
+    # first missed frame (model output instead of interpolated boxes).
+    reseed_after_miss: bool = False
+    reseed_max_attempts: int = 2
+    # Scale applied to the SAM3 prompt box around its centre (1.0 = as drawn).
+    # < 1.0 trims the dark rod/pole a resting ball sits on out of the prompt.
+    prompt_box_scale: float = 1.0
+    # Rod-like mask guard: a thin vertical mask (post/rod) is emitted at its
+    # top edge (where the ball sits) instead of the strip centroid.
+    rod_mask_anchor: bool = False
+    rod_mask_max_width: int = 3
+    rod_mask_min_aspect: float = 2.0
+    # Rod-like mask: re-anchor the emitted centre on the dark blob just above
+    # the rod tip (the ball that left the launcher) instead of the strip.
+    rod_mask_blob_reanchor: bool = False
+    rod_blob_search_px: int = 24
+    rod_blob_margin: float = 15.0
+    # Lollipop masks (wider ball head on a thin rod tail) are anchored at the
+    # head; the head is >= this multiple of the tail width.
+    rod_mask_lollipop_ratio: float = 2.0
     ir_refine_enabled: bool = False
     ir_stop_on_missing: bool = False
     adaptive_padding_factor: float = ADAPTIVE_PADDING_FACTOR
@@ -82,6 +167,12 @@ class Sam3Config:
     adaptive_selection_prior_max_age_frames: int = LATENT_PRIOR_SELECTION_PRIOR_MAX_AGE_FRAMES
     adaptive_emission_hold_max_age_frames: int = LATENT_PRIOR_EMISSION_HOLD_MAX_AGE_FRAMES
     adaptive_growth_confirmations: int = LATENT_PRIOR_GROWTH_CONFIRMATIONS
+    motion_blur_min_eigen_ratio: float = MOTION_BLUR_MIN_EIGEN_RATIO_DEFAULT
+    motion_blur_min_mask_pixels: int = MOTION_BLUR_MIN_MASK_PIXELS_DEFAULT
+    motion_blur_target_fraction: float = MOTION_BLUR_TARGET_FRACTION_DEFAULT
+    motion_blur_intensity_center: bool = False
+    motion_blur_stabilized_diameter: bool = False
+    motion_blur_diameter_window: int = 2
 
 
 def parse_bool_env(value, default=False):
@@ -101,9 +192,9 @@ def load_sam3_config(environ=None):
     if mode not in VALID_PROMPT_MODES:
         mode = "box"
     text_prompt = env.get("SAM3_TEXT_PROMPT", DEFAULT_TEXT_PROMPT).strip()
-    policy = env.get("SAM3_OUTPUT_POLICY", "sam_box").strip().lower()
+    policy = env.get("SAM3_OUTPUT_POLICY", DEFAULT_OUTPUT_POLICY).strip().lower()
     if policy not in VALID_OUTPUT_POLICIES:
-        policy = "sam_box"
+        policy = DEFAULT_OUTPUT_POLICY
     try:
         prob_thresh = float(env.get("SAM3_OUTPUT_PROB_THRESH", str(DEFAULT_OUTPUT_PROB_THRESH)))
     except ValueError:
@@ -136,6 +227,29 @@ def load_sam3_config(environ=None):
         text_prompt=text_prompt,
         output_policy=policy,
         output_prob_thresh=prob_thresh,
+        detection_score_threshold=_float_env(
+            "SAM3_DETECTION_SCORE_THRESHOLD", DEFAULT_DETECTION_SCORE_THRESHOLD
+        ),
+        detection_max_prompt_distance_px=_float_env(
+            "SAM3_DETECTION_MAX_PROMPT_DISTANCE_PX", 0.0
+        ),
+        recover_after_miss=parse_bool_env(env.get("SAM3_RECOVER_AFTER_MISS"), False),
+        edge_hold_enabled=parse_bool_env(env.get("SAM3_EDGE_HOLD"), False),
+        ui_gate_clamp=parse_bool_env(env.get("SAM3_UI_GATE_CLAMP"), False),
+        trailing_hold_frames=_int_env("SAM3_TRAILING_HOLD_FRAMES", 0),
+        recover_max_gap=_int_env("SAM3_RECOVER_MAX_GAP", 2),
+        reseed_after_miss=parse_bool_env(env.get("SAM3_RESEED_AFTER_MISS"), False),
+        reseed_max_attempts=_int_env("SAM3_RESEED_MAX_ATTEMPTS", 2),
+        prompt_box_scale=_float_env("SAM3_PROMPT_BOX_SCALE", 1.0),
+        rod_mask_anchor=parse_bool_env(env.get("SAM3_ROD_MASK_ANCHOR"), False),
+        rod_mask_max_width=_int_env("SAM3_ROD_MASK_MAX_WIDTH", 3),
+        rod_mask_min_aspect=_float_env("SAM3_ROD_MASK_MIN_ASPECT", 2.0),
+        rod_mask_blob_reanchor=parse_bool_env(
+            env.get("SAM3_ROD_BLOB_REANCHOR"), False
+        ),
+        rod_blob_search_px=_int_env("SAM3_ROD_BLOB_SEARCH_PX", 24),
+        rod_blob_margin=_float_env("SAM3_ROD_BLOB_MARGIN", 15.0),
+        rod_mask_lollipop_ratio=_float_env("SAM3_ROD_MASK_LOLLIPOP_RATIO", 2.0),
         ir_refine_enabled=ir_refine_enabled,
         ir_stop_on_missing=ir_stop_on_missing,
         adaptive_padding_factor=_float_env("SAM3_ADAPTIVE_PADDING_FACTOR", padding_default),
@@ -169,6 +283,22 @@ def load_sam3_config(environ=None):
             "SAM3_ADAPTIVE_GROWTH_CONFIRMATIONS",
             LATENT_PRIOR_GROWTH_CONFIRMATIONS,
         ),
+        motion_blur_min_eigen_ratio=_float_env(
+            "SAM3_MOTION_BLUR_MIN_EIGEN_RATIO", MOTION_BLUR_MIN_EIGEN_RATIO_DEFAULT
+        ),
+        motion_blur_min_mask_pixels=_int_env(
+            "SAM3_MOTION_BLUR_MIN_MASK_PIXELS", MOTION_BLUR_MIN_MASK_PIXELS_DEFAULT
+        ),
+        motion_blur_target_fraction=_float_env(
+            "SAM3_MOTION_BLUR_TARGET_FRACTION", MOTION_BLUR_TARGET_FRACTION_DEFAULT
+        ),
+        motion_blur_intensity_center=parse_bool_env(
+            env.get("SAM3_MOTION_BLUR_INTENSITY_CENTER"), False
+        ),
+        motion_blur_stabilized_diameter=parse_bool_env(
+            env.get("SAM3_MOTION_BLUR_STABILIZED_DIAMETER"), False
+        ),
+        motion_blur_diameter_window=_int_env("SAM3_MOTION_BLUR_DIAMETER_WINDOW", 2),
     )
 
 
@@ -299,12 +429,53 @@ def select_bbox_from_outputs(outputs, image_height, image_width, reference_bbox,
         return None
 
     ref_cx, ref_cy = bbox_center(reference_bbox)
+    max_distance = float(
+        getattr(config, "detection_max_prompt_distance_px", 0.0) or 0.0
+    )
+    if max_distance > 0.0:
+        candidates = [
+            bbox
+            for bbox in candidates
+            if (
+                (bbox_center(bbox)[0] - ref_cx) ** 2
+                + (bbox_center(bbox)[1] - ref_cy) ** 2
+            )
+            ** 0.5
+            <= max_distance
+        ]
+        if not candidates:
+            return None
     best = min(
         candidates,
         key=lambda bbox: (bbox_center(bbox)[0] - ref_cx) ** 2
         + (bbox_center(bbox)[1] - ref_cy) ** 2,
     )
     return best
+
+
+def select_mask_from_outputs(outputs, reference_bbox):
+    """SAM3 mask nearest the reference-box centre.
+
+    Applies the same nearest-to-reference rule as ``mask_center_box`` candidate
+    selection.  Returns ``None`` when no usable mask candidate exists.
+    """
+    if outputs is None or reference_bbox is None:
+        return None
+    masks = outputs.get("out_binary_masks")
+    if masks is None:
+        return None
+    ref_cx, ref_cy = bbox_center(reference_bbox)
+    best_mask = None
+    best_distance = None
+    for mask in masks:
+        centroid = mask_centroid(mask)
+        if centroid is None:
+            continue
+        distance = (centroid[0] - ref_cx) ** 2 + (centroid[1] - ref_cy) ** 2
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_mask = mask
+    return best_mask
 
 
 def image_to_grayscale(image):
@@ -1432,6 +1603,25 @@ def log_adaptive_scale_diagnostics(diag, *, relative_frame, diag_meta=None):
     log_frame_record(record)
 
 
+def log_motion_blur_diagnostics(diag, *, relative_frame=None, diag_meta=None):
+    """Read-only motion-blur diagnostics; payload-free (no masks)."""
+    if not diag_enabled() or diag is None:
+        return
+    record = {
+        "event": "motion_blur_center",
+        "relativeFrame": relative_frame,
+        **diag,
+    }
+    if diag_meta:
+        record.update({
+            "sessionId": diag_meta.get("sessionId"),
+            "jobFrameIndex": diag_meta.get("jobFrameIndex"),
+            "requestId": diag_meta.get("requestId"),
+            "requestType": diag_meta.get("requestType"),
+        })
+    log_frame_record(record)
+
+
 def log_lost_frame_diagnostics(
     *,
     reason,
@@ -1564,13 +1754,14 @@ def _bboxes_near(a, b, tol=2.0):
     return all(abs(float(a[i]) - float(b[i])) <= tol for i in range(4))
 
 
-def _sam_bbox_temporally_consistent(sam_bbox, previous_bbox):
+def _sam_bbox_temporally_consistent(sam_bbox, previous_bbox, max_disp_ratio=None):
     """Reuse IR temporal gate: SAM center must stay within existing max displacement."""
     if previous_bbox is None or sam_bbox is None:
         return True
     box_w = max(float(sam_bbox[2]) - float(sam_bbox[0]), MIN_BOX_SIDE_PX)
     box_h = max(float(sam_bbox[3]) - float(sam_bbox[1]), MIN_BOX_SIDE_PX)
-    max_temporal_disp = max(box_w, box_h) * IR_REFINE_MAX_TEMPORAL_DISP_RATIO
+    ratio = IR_REFINE_MAX_TEMPORAL_DISP_RATIO if max_disp_ratio is None else max_disp_ratio
+    max_temporal_disp = max(box_w, box_h) * ratio
     prev_cx, prev_cy = bbox_center(previous_bbox)
     sam_cx, sam_cy = bbox_center(sam_bbox)
     temporal_disp = ((sam_cx - prev_cx) ** 2 + (sam_cy - prev_cy) ** 2) ** 0.5
@@ -1624,7 +1815,27 @@ class ModelHandler:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.config = config if config is not None else load_sam3_config()
         self.predictor = build_sam3_predictor(version="sam3", compile=False)
+        self._apply_detection_score_threshold()
         self._sessions = {}
+
+    def _apply_detection_score_threshold(self):
+        """Apply the configured SAM3 VG detection gate to the built model.
+
+        ``build_sam3_video_model`` hard-codes ``score_threshold_detection=0.5``
+        and the handler cannot pass it as a build argument, but
+        ``Sam3VideoBase.run_backbone_and_detection`` reads the attribute on
+        every frame, so setting it after build is sufficient.
+        """
+        threshold = float(
+            getattr(
+                self.config,
+                "detection_score_threshold",
+                DEFAULT_DETECTION_SCORE_THRESHOLD,
+            )
+        )
+        model = getattr(self.predictor, "model", None)
+        if model is not None and hasattr(model, "score_threshold_detection"):
+            model.score_threshold_detection = threshold
 
     def _new_session_record(self):
         return {
@@ -1640,6 +1851,8 @@ class ModelHandler:
             "preloaded_until_frame": None,
             "frame_cache": {},
             "cache_ready": False,
+            "ui_emit_window": [],
+            "ui_emit_prev_center": None,
         }
 
     def _register_session(self, key, sess):
@@ -1858,6 +2071,249 @@ class ModelHandler:
                 outputs_by_frame[int(frame_idx)] = response.get("outputs")
         return outputs_by_frame
 
+    def _propagate_range(self, sess, start_frame, end_frame):
+        """Forward propagation for one index range after a mid-rally re-prompt."""
+        outputs_by_frame = {}
+        max_track = max(int(end_frame) - int(start_frame), 0)
+        request = {
+            "type": "propagate_in_video",
+            "session_id": sess["session_id"],
+            "start_frame_index": int(start_frame),
+            "max_frame_num_to_track": max_track,
+            "propagation_direction": "forward",
+        }
+        if self.config.prompt_mode == "box":
+            request["force_tracker_propagation"] = True
+        for response in self.predictor.handle_stream_request(request=request):
+            frame_idx = response.get("frame_index")
+            if frame_idx is not None:
+                outputs_by_frame[int(frame_idx)] = response.get("outputs")
+        return outputs_by_frame
+
+    def _stable_diameter_map(self, outputs_by_frame, frame_count):
+        """Per-frame median minor extent of nearby non-elongated masks."""
+        window = max(int(self.config.motion_blur_diameter_window), 0)
+        stable = {}
+        for relative_frame in range(int(frame_count)):
+            masks = []
+            for neighbour in range(relative_frame - window, relative_frame + window + 1):
+                outputs = outputs_by_frame.get(neighbour)
+                if not outputs:
+                    continue
+                candidates = outputs.get("out_binary_masks")
+                if candidates is None:
+                    continue
+                for mask in candidates:
+                    masks.append(mask)
+            stable[relative_frame] = median_sharp_diameter(
+                masks,
+                max_ratio=self.config.motion_blur_min_eigen_ratio,
+                min_mask_pixels=self.config.motion_blur_min_mask_pixels,
+            )
+        return stable
+
+    def _motion_blur_target_bbox(
+        self,
+        sess,
+        frame_image,
+        outputs,
+        reference_bbox,
+        previous_outputs,
+        next_outputs,
+        relative_frame=None,
+        diag_meta=None,
+    ):
+        """Emitted square centred on the motion-aware target.
+
+        Falls back to the current-mask centroid square when the estimator
+        cannot correct, and returns no box (canonical bbox kept) when even the
+        mask is unusable.  Canonical tracking state is never changed here.
+        """
+        current_mask = select_mask_from_outputs(outputs, reference_bbox)
+        previous_centroid = mask_centroid(
+            select_mask_from_outputs(previous_outputs, reference_bbox)
+        )
+        next_centroid = mask_centroid(
+            select_mask_from_outputs(next_outputs, reference_bbox)
+        )
+        center_xy = None
+        if self.config.motion_blur_intensity_center:
+            center_xy = intensity_weighted_centroid(frame_image, current_mask)
+        diameter_override = None
+        if self.config.motion_blur_stabilized_diameter:
+            diameter_override = sess.get("motion_blur_stable_diameter", {}).get(
+                relative_frame
+            )
+        estimate = estimate_motion_blur_center(
+            current_mask,
+            previous_centroid,
+            next_centroid,
+            min_eigen_ratio=self.config.motion_blur_min_eigen_ratio,
+            min_mask_pixels=self.config.motion_blur_min_mask_pixels,
+            target_fraction=self.config.motion_blur_target_fraction,
+            center_xy=center_xy,
+            diameter_override=diameter_override,
+        )
+        diag = motion_blur_report_row(estimate, frame_id=relative_frame)
+        diag["center_source"] = "intensity" if center_xy is not None else "mask"
+        log_motion_blur_diagnostics(
+            diag, relative_frame=relative_frame, diag_meta=diag_meta
+        )
+        if estimate.target_xy is None:
+            return None, diag
+        target_x, target_y = estimate.target_xy
+        if current_mask is not None and self._is_rod_like_mask(current_mask):
+            applied = False
+            if self.config.rod_mask_blob_reanchor and self._is_thin_mask(
+                current_mask
+            ):
+                blob = self._dark_blob_above_mask(frame_image, current_mask)
+                if blob is not None:
+                    target_x, target_y = blob
+                    diag["rod_blob_reanchor"] = True
+                    applied = True
+            if not applied and self.config.rod_mask_anchor:
+                anchor = self._rod_mask_head_center(current_mask)
+                if anchor is not None:
+                    target_x, target_y = anchor
+                    diag["rod_mask_anchor"] = True
+        side = max(
+            float(estimate.diameter_override or estimate.diameter or 0.0),
+            MIN_BOX_SIDE_PX,
+        )
+        bbox = square_bbox_from_center(
+            target_x,
+            target_y,
+            side,
+            sess["image_height"],
+            sess["image_width"],
+        )
+        return bbox, diag
+
+    def _mask_width(self, mask):
+        points = mask_points(mask)
+        if points is None or len(points) == 0:
+            return None
+        return float(points[:, 0].max() - points[:, 0].min()) + 1.0
+
+    def _is_thin_mask(self, mask):
+        """Thin strip (rod width); excludes blurred-ball streaks (4+ px)."""
+        width = self._mask_width(mask)
+        if width is None:
+            return False
+        return width <= float(self.config.rod_mask_max_width)
+
+    def _is_rod_like_mask(self, mask):
+        """True for a vertically elongated mask (rod/ball-on-rod strip)."""
+        points = mask_points(mask)
+        if points is None or len(points) == 0:
+            return False
+        width = float(points[:, 0].max() - points[:, 0].min()) + 1.0
+        height = float(points[:, 1].max() - points[:, 1].min()) + 1.0
+        return height >= width * float(self.config.rod_mask_min_aspect)
+
+    def _dark_blob_above_mask(self, image, mask):
+        """Dark blob centroid just above a rod-like mask (the launched ball).
+
+        The tracker can latch onto the rod under a dark ball resting on the
+        launcher post; the ball is then the only dark blob above the rod tip.
+        Returns ``None`` when the window holds no ball-sized dark blob.
+        """
+        points = mask_points(mask)
+        if points is None or len(points) == 0:
+            return None
+        gray = image_to_grayscale(image)
+        image_height, image_width = gray.shape[:2]
+        top_y = float(points[:, 1].min())
+        center_x = float(points[:, 0].mean())
+        search = max(int(self.config.rod_blob_search_px), 4)
+        x0 = max(0, int(center_x) - 8)
+        x1 = min(image_width, int(center_x) + 9)
+        y0 = max(0, int(top_y) - search)
+        y1 = max(0, min(int(top_y) - 1, image_height))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        window = gray[y0:y1, x0:x1]
+        background = float(np.median(window))
+        dark = (window < (background - float(self.config.rod_blob_margin))).astype(
+            np.uint8
+        )
+        count = int(dark.sum())
+        if count < ROD_BLOB_MIN_PIXELS or count > ROD_BLOB_MAX_PIXELS:
+            return None
+        components, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            dark, connectivity=8
+        )
+        best = None
+        for index in range(1, components):
+            area = int(stats[index, cv2.CC_STAT_AREA])
+            if area < ROD_BLOB_MIN_PIXELS or area > ROD_BLOB_MAX_PIXELS:
+                continue
+            blob_h = int(stats[index, cv2.CC_STAT_HEIGHT])
+            blob_w = int(stats[index, cv2.CC_STAT_WIDTH])
+            if max(blob_h, blob_w) > 2 * max(min(blob_h, blob_w), 1) + 4:
+                continue
+            component = window[labels == index]
+            if float(component.min()) > background - 2.0 * float(
+                self.config.rod_blob_margin
+            ):
+                continue  # only noise-level darkness: skip
+            centroid_y = centroids[index][1]
+            if best is None or centroid_y < best[0]:
+                best = (
+                    centroid_y,
+                    float(centroids[index][0]) + x0,
+                    float(centroid_y) + y0,
+                )
+        if best is None:
+            return None
+        return best[1], best[2]
+
+    def _mask_band_widths(self, mask):
+        """Width of the mask's top and bottom thirds, in pixels."""
+        points = mask_points(mask)
+        if points is None or len(points) == 0:
+            return None
+        ys = points[:, 1]
+        top = float(ys.min())
+        bottom = float(ys.max())
+        span = max(bottom - top + 1.0, 1.0)
+        head = points[ys <= top + span * 0.3]
+        tail = points[ys >= bottom - span * 0.3]
+        if len(head) == 0 or len(tail) == 0:
+            return None
+        head_width = float(head[:, 0].max() - head[:, 0].min()) + 1.0
+        tail_width = float(tail[:, 0].max() - tail[:, 0].min()) + 1.0
+        return head_width, tail_width
+
+    def _rod_mask_head_center(self, mask):
+        """Top-edge centre of a rod-like mask whose head is a ball.
+
+        Accepts thin strips (the rod alone) and lollipop masks (ball merged
+        with the rod below it, head clearly wider than the tail).
+        """
+        points = mask_points(mask)
+        if points is None or len(points) == 0:
+            return None
+        width = float(points[:, 0].max() - points[:, 0].min()) + 1.0
+        height = float(points[:, 1].max() - points[:, 1].min()) + 1.0
+        if height < width * float(self.config.rod_mask_min_aspect):
+            return None
+        if width > float(self.config.rod_mask_max_width):
+            bands = self._mask_band_widths(mask)
+            if bands is None:
+                return None
+            head_width, tail_width = bands
+            ratio = head_width / max(tail_width, 1.0)
+            if ratio < float(self.config.rod_mask_lollipop_ratio):
+                return None
+        centroid_x = float(points[:, 0].mean())
+        head = points[points[:, 1] <= float(points[:, 1].min()) + 2.0]
+        if len(head) > 0:
+            centroid_x = float(head[:, 0].mean())
+        top_y = float(points[:, 1].min()) + 0.5
+        return centroid_x, top_y
+
     def _postprocess_frame_outputs(
         self,
         sess,
@@ -1872,15 +2328,19 @@ class ModelHandler:
         diag_meta=None,
         previous_accepted_target_side=None,
         latent_prior_state=None,
+        previous_outputs=None,
+        next_outputs=None,
         lost_reason_out=None,
     ):
-        if prev_lost:
+        if prev_lost and not self.config.recover_after_miss:
             if lost_reason_out is not None:
                 lost_reason_out.append("sticky_prev_lost")
             return None, True, None, None
 
         reference_bbox = prompt_bbox if is_init_frame else last_known_bbox
-        if self.config.output_policy in ADAPTIVE_COMPONENT_POLICIES:
+        if self.config.output_policy in ADAPTIVE_COMPONENT_POLICIES or (
+            self.config.output_policy == "motion_blur_center_box"
+        ):
             center_cfg = replace(self.config, output_policy="mask_center_box")
             bbox = select_bbox_from_outputs(
                 outputs,
@@ -1945,6 +2405,9 @@ class ModelHandler:
             and last_known_bbox is not None
             and _bboxes_near(bbox, prompt_bbox)
             and not _bboxes_near(last_known_bbox, prompt_bbox)
+            and not _sam_bbox_temporally_consistent(
+                bbox, last_known_bbox, FALSE_RELOCK_MAX_DISP_RATIO
+            )
         ):
             log_lost_frame_diagnostics(
                 reason="false_relock",
@@ -1965,7 +2428,20 @@ class ModelHandler:
         canonical_tracking_bbox = list(bbox)
         emitted_bbox = canonical_tracking_bbox
         adaptive_diag = None
-        if self.config.output_policy == "adaptive_component_square_box":
+        if self.config.output_policy == "motion_blur_center_box":
+            motion_bbox, adaptive_diag = self._motion_blur_target_bbox(
+                sess,
+                frame_image,
+                outputs,
+                reference_bbox,
+                previous_outputs,
+                next_outputs,
+                relative_frame=relative_frame,
+                diag_meta=diag_meta,
+            )
+            if motion_bbox is not None:
+                emitted_bbox = motion_bbox
+        elif self.config.output_policy == "adaptive_component_square_box":
             emitted_bbox, adaptive_diag = apply_adaptive_component_square_box(
                 frame_image,
                 canonical_tracking_bbox,
@@ -2036,7 +2512,362 @@ class ModelHandler:
                     diag_meta=diag_meta,
                 )
 
+        if not is_init_frame:
+            emitted_bbox = self._maybe_apply_edge_hold(
+                emitted_bbox,
+                last_known_bbox,
+                sess,
+            )
+        if (
+            self.config.ui_gate_clamp
+            and emitted_bbox is not None
+            and not sess.get("_cache_build")
+        ):
+            emitted_bbox = self._clamp_emitted_to_ui_gate(
+                sess,
+                emitted_bbox,
+                prompt_bbox,
+                is_init_frame,
+            )
+
         return emitted_bbox, False, adaptive_diag, canonical_tracking_bbox
+
+    def _clamp_emitted_to_ui_gate(self, sess, emitted_bbox, prompt_bbox, is_init_frame):
+        """Keep the emitted box inside the frontend ball-geometry envelope.
+
+        The Track Rallies staging discards a segment when a box violates the
+        median-of-8 area/aspect/displacement/velocity limits (launch
+        acceleration or the ball leaving the frame). Clamping only the emitted
+        geometry keeps the internal tracking reference untouched.
+        """
+        bbox = [float(value) for value in emitted_bbox]
+        prompt = [float(value) for value in prompt_bbox]
+        if is_init_frame or not sess.get("ui_emit_window"):
+            window = [prompt]
+            sess["ui_emit_window"] = window
+            sess["ui_emit_prev_center"] = bbox_center(prompt)
+            reference = prompt
+        else:
+            window = list(sess["ui_emit_window"])
+            reference = window[-1]
+        areas = [
+            max(1.0, (float(box[2]) - float(box[0])) * (float(box[3]) - float(box[1])))
+            for box in window
+        ]
+        ref_area = float(np.median(areas)) if areas else 1.0
+        diagonals = [
+            max(
+                bbox_side_length(box) * (2.0 ** 0.5),
+                MIN_BOX_SIDE_PX,
+            )
+            for box in window
+        ]
+        ref_diagonal = float(np.median(diagonals)) if diagonals else MIN_BOX_SIDE_PX
+        ref_cx, ref_cy = bbox_center(reference)
+        max_step = ref_diagonal * UI_GATE_CLAMP_MAX_DISP_DIAGONALS
+        prev_center = sess.get("ui_emit_prev_center")
+        if prev_center is not None:
+            prev_step = (
+                (ref_cx - float(prev_center[0])) ** 2
+                + (ref_cy - float(prev_center[1])) ** 2
+            ) ** 0.5
+            if prev_step > 1.0:
+                max_step = min(
+                    max_step, prev_step * UI_GATE_CLAMP_MAX_VELOCITY_RESIDUAL
+                )
+        cand_cx, cand_cy = bbox_center(bbox)
+        step = ((cand_cx - ref_cx) ** 2 + (cand_cy - ref_cy) ** 2) ** 0.5
+        if step > max_step and step > 0.0:
+            scale = max_step / step
+            cand_cx = ref_cx + (cand_cx - ref_cx) * scale
+            cand_cy = ref_cy + (cand_cy - ref_cy) * scale
+        side = bbox_side_length(bbox)
+        area = side * side
+        max_area = ref_area * UI_GATE_CLAMP_MAX_AREA_RATIO
+        min_area = ref_area * UI_GATE_CLAMP_MIN_AREA_RATIO
+        if area > max_area:
+            side = max_area ** 0.5
+        elif area < min_area:
+            side = min_area ** 0.5
+        side = max(float(side), MIN_BOX_SIDE_PX)
+        clamped = square_bbox_from_center(
+            cand_cx,
+            cand_cy,
+            side,
+            sess["image_height"],
+            sess["image_width"],
+        )
+        if not is_init_frame:
+            verdict = self._ui_gate_verdict(
+                clamped, window, sess.get("ui_emit_prev_center")
+            )
+            if verdict == "valid":
+                window = (window + [clamped])[-UI_GATE_EMIT_WINDOW:]
+                sess["ui_emit_window"] = window
+                sess["ui_emit_prev_center"] = (cand_cx, cand_cy)
+        return clamped
+
+    def _ui_gate_verdict(self, candidate, window, prev_center):
+        """Mirror the frontend rally staging verdict for one emitted box.
+
+        The staging appends only boxes it accepts as valid to its reference
+        window, so the clamp window must skip soft frames the same way or the
+        two medians drift apart and the staging sees growth the clamp allowed.
+        """
+        if len(window) < 2:
+            return "valid"
+        reference = window[-1]
+        areas = [
+            max(
+                1.0,
+                (float(box[2]) - float(box[0])) * (float(box[3]) - float(box[1])),
+            )
+            for box in window
+        ]
+        diagonals = [
+            max(bbox_side_length(box) * (2.0 ** 0.5), MIN_BOX_SIDE_PX)
+            for box in window
+        ]
+        ref_area = max(1.0, float(np.median(areas)))
+        ref_diagonal = max(float(np.median(diagonals)), float(MIN_BOX_SIDE_PX))
+        side = bbox_side_length(candidate)
+        area_ratio = (side * side) / ref_area
+        cand_cx, cand_cy = bbox_center(candidate)
+        ref_cx, ref_cy = bbox_center(reference)
+        distance = ((cand_cx - ref_cx) ** 2 + (cand_cy - ref_cy) ** 2) ** 0.5
+        displacement_scale = distance / ref_diagonal
+        if (
+            area_ratio < UI_GATE_HARD_AREA_MIN_RATIO
+            or area_ratio > UI_GATE_HARD_AREA_MAX_RATIO
+            or displacement_scale > UI_GATE_HARD_MAX_DISP_SCALE
+        ):
+            return "hard"
+        soft = 0
+        if (
+            area_ratio < UI_GATE_SOFT_AREA_MIN_RATIO
+            or area_ratio > UI_GATE_SOFT_AREA_MAX_RATIO
+        ):
+            soft += 1
+        if displacement_scale > UI_GATE_SOFT_MAX_DISP_SCALE:
+            soft += 1
+        if prev_center is not None:
+            expected = (
+                (ref_cx - float(prev_center[0])) ** 2
+                + (ref_cy - float(prev_center[1])) ** 2
+            ) ** 0.5
+            if expected > 1.0 and distance > expected * UI_GATE_MAX_VELOCITY_RESIDUAL:
+                soft += 1
+        if soft >= 2:
+            return "hard"
+        return "soft" if soft == 1 else "valid"
+
+    def _apply_ui_gate_clamp(self, cache, preload_count, sess, prompt_bbox):
+        """Cap the emitted cache boxes to the frontend rally staging envelope.
+
+        Runs over the final timeline: the staging reference window then holds
+        exactly these boxes in this order, so no emitted frame trips the
+        staging geometry checks; internal tracking references stay untouched.
+        """
+        if not self.config.ui_gate_clamp:
+            return 0
+        prompt = [float(value) for value in prompt_bbox]
+        sess["ui_emit_window"] = [prompt]
+        sess["ui_emit_prev_center"] = bbox_center(prompt)
+        capped_count = 0
+        for frame in range(1, int(preload_count)):
+            entry = cache.get(frame) or {}
+            box = entry.get("bbox")
+            if entry.get("lost") or box is None:
+                continue
+            clamped = self._clamp_emitted_to_ui_gate(sess, box, prompt, False)
+            if any(
+                abs(float(a) - float(b)) > 1e-6 for a, b in zip(box, clamped)
+            ):
+                capped_count += 1
+            entry["bbox"] = clamped
+        return capped_count
+
+    def _should_hold_trailing_frame(self, relative_frame, preload_count, prev_bbox):
+        """True when a miss should hold the last box at the end of the chunk."""
+        if not self.config.recover_after_miss or self.config.trailing_hold_frames <= 0:
+            return False
+        if prev_bbox is None:
+            return False
+        return int(relative_frame) >= int(preload_count) - int(
+            self.config.trailing_hold_frames
+        )
+
+    def _interpolate_miss_gaps(self, cache, preload_count, sess):
+        """Fill short internal gaps with linear box interpolation.
+
+        The UI stops a rally on any frame without a box and needs a box on
+        every frame, so a short dropout is filled rather than marked lost.
+        Gaps longer than ``recover_max_gap`` keep today's loss behaviour.
+        """
+        if not self.config.recover_after_miss or self.config.recover_max_gap <= 0:
+            return []
+        max_gap = int(self.config.recover_max_gap)
+        height = sess.get("image_height")
+        width = sess.get("image_width")
+        if height is None or width is None:
+            return []
+        interpolated = []
+        frame = 1
+        while frame < int(preload_count):
+            entry = cache.get(frame) or {}
+            if not entry.get("lost"):
+                frame += 1
+                continue
+            start = frame
+            end = start
+            while end + 1 < int(preload_count) and (cache.get(end + 1) or {}).get(
+                "lost"
+            ):
+                end += 1
+            gap = end - start + 1
+            before = cache.get(start - 1) if start > 0 else None
+            after = cache.get(end + 1) if end + 1 < int(preload_count) else None
+            if (
+                gap <= max_gap
+                and before is not None
+                and after is not None
+                and not before.get("lost")
+                and not after.get("lost")
+                and before.get("bbox") is not None
+                and after.get("bbox") is not None
+            ):
+                box_before = [float(value) for value in before["bbox"]]
+                box_after = [float(value) for value in after["bbox"]]
+                start_cx, start_cy = bbox_center(box_before)
+                end_cx, end_cy = bbox_center(box_after)
+                start_side = bbox_side_length(box_before)
+                end_side = bbox_side_length(box_after)
+                for index in range(start, end + 1):
+                    fraction = (index - start + 1) / (gap + 1.0)
+                    center_x = start_cx + (end_cx - start_cx) * fraction
+                    center_y = start_cy + (end_cy - start_cy) * fraction
+                    side = start_side + (end_side - start_side) * fraction
+                    cache[index] = {
+                        "bbox": square_bbox_from_center(
+                            center_x, center_y, side, height, width
+                        ),
+                        "lost": False,
+                        "interpolated": True,
+                    }
+                    interpolated.append(index)
+            frame = end + 1
+        if interpolated and diag_enabled():
+            log_frame_record({
+                "event": "interpolated_frames",
+                "relativeFrames": list(interpolated),
+                "maxGap": max_gap,
+            })
+        return interpolated
+
+    def _output_reference_box(self, outputs, height, width, reference):
+        """Mask-centroid square for one frame's outputs, or None when empty."""
+        mask = select_mask_from_outputs(outputs, reference)
+        if mask is None:
+            return None
+        centroid = mask_centroid(mask)
+        if centroid is None:
+            return None
+        side = bbox_side_length(reference)
+        return square_bbox_from_center(
+            centroid[0], centroid[1], side, height, width
+        )
+
+    def _reseed_after_long_miss(self, sess, outputs_by_frame, preload_count):
+        """Re-prompt the tracker after long model dropouts.
+
+        When the model returns no object for more than ``recover_max_gap``
+        consecutive frames, the tracker is re-prompted with the last accepted
+        box at the first missed frame and re-propagates forward, so the dropout
+        is filled by model output instead of a straight-line interpolation.
+        Returns the number of re-prompts performed.
+        """
+        if not self.config.reseed_after_miss:
+            return 0
+        height = sess.get("image_height")
+        width = sess.get("image_width")
+        prompt_bbox = sess.get("prompt_bbox")
+        if height is None or width is None or prompt_bbox is None:
+            return 0
+        frame_count = int(preload_count)
+        max_gap = max(int(self.config.recover_max_gap), 0)
+        budget = max(int(self.config.reseed_max_attempts), 1)
+        reference = [float(value) for value in prompt_bbox]
+        reseeds = 0
+        frame = 1
+        while frame < frame_count and reseeds < budget:
+            box = self._output_reference_box(
+                outputs_by_frame.get(frame), height, width, reference
+            )
+            if box is not None:
+                reference = box
+                frame += 1
+                continue
+            start = frame
+            end = start
+            while end + 1 < frame_count:
+                probe = self._output_reference_box(
+                    outputs_by_frame.get(end + 1), height, width, reference
+                )
+                if probe is not None:
+                    break
+                end += 1
+            if end - start + 1 <= max_gap or start == 0:
+                frame = end + 1
+                continue
+            reseeds += 1
+            self._add_prompt(sess, start, bbox=reference)
+            refreshed = self._propagate_range(
+                sess, start, frame_count - 1
+            )
+            for index, outputs in refreshed.items():
+                if index >= start:
+                    outputs_by_frame[index] = outputs
+            if diag_enabled():
+                log_frame_record({
+                    "event": "reseed_after_miss",
+                    "startFrame": int(start),
+                    "gapFrames": int(end - start + 1),
+                    "referenceBbox": bbox_summary(reference),
+                    "refreshedFrames": len(refreshed),
+                })
+            frame = start
+        return reseeds
+
+    def _maybe_apply_edge_hold(self, emitted_bbox, reference_bbox, sess):
+        """Fail-soft near image borders: hold the last accepted box.
+
+        A mask that reaches the image border can produce an edge-clamped box
+        whose centre is far outside the last accepted box; the UI geometry gate
+        rejects such a frame and discards the whole segment. When enabled, keep
+        the last accepted box for that frame instead.
+        """
+        if (
+            not self.config.edge_hold_enabled
+            or emitted_bbox is None
+            or reference_bbox is None
+        ):
+            return emitted_bbox
+        height = float(sess.get("image_height") or 0.0)
+        width = float(sess.get("image_width") or 0.0)
+        if height <= 0.0 or width <= 0.0:
+            return emitted_bbox
+        x1, y1, x2, y2 = [float(value) for value in emitted_bbox]
+        touches_border = (
+            x1 <= 0.0 or y1 <= 0.0 or x2 >= width - 1.0 or y2 >= height - 1.0
+        )
+        if not touches_border:
+            return emitted_bbox
+        ref_cx, ref_cy = bbox_center(reference_bbox)
+        cand_cx, cand_cy = bbox_center(emitted_bbox)
+        distance = ((cand_cx - ref_cx) ** 2 + (cand_cy - ref_cy) ** 2) ** 0.5
+        if distance <= bbox_side_length(reference_bbox) * EDGE_HOLD_MAX_DISP_SIDES:
+            return emitted_bbox
+        return list(reference_bbox)
 
     def _build_frame_cache(
         self,
@@ -2052,6 +2883,14 @@ class ModelHandler:
             sess["session_id"] = self._start_session(sess)
             self._add_prompt(sess, 0)
             outputs_by_frame = self._propagate_full_chunk(sess, preload_count)
+            self._reseed_after_long_miss(sess, outputs_by_frame, preload_count)
+            if (
+                self.config.output_policy == "motion_blur_center_box"
+                and self.config.motion_blur_stabilized_diameter
+            ):
+                sess["motion_blur_stable_diameter"] = self._stable_diameter_map(
+                    outputs_by_frame, preload_count
+                )
 
             prev_bbox = None
             prev_lost = False
@@ -2060,9 +2899,11 @@ class ModelHandler:
             prompt_bbox = sess["prompt_bbox"]
             lost_reason_out = []
             lost_count = 0
+            last_emitted_bbox = None
             first_lost_relative_frame = None
             first_lost_reason = None
 
+            sess["_cache_build"] = True
             for relative_frame in range(int(preload_count)):
                 frame_image = self._load_preloaded_frame(sess, relative_frame)
                 outputs = outputs_by_frame.get(relative_frame)
@@ -2080,9 +2921,17 @@ class ModelHandler:
                         relative_frame=relative_frame,
                         previous_accepted_target_side=prev_accepted_target_side,
                         latent_prior_state=prev_latent_prior_state,
+                        previous_outputs=outputs_by_frame.get(relative_frame - 1),
+                        next_outputs=outputs_by_frame.get(relative_frame + 1),
                         lost_reason_out=lost_reason_out,
                     )
                 )
+                if lost and self._should_hold_trailing_frame(
+                    relative_frame, preload_count, prev_bbox
+                ):
+                    emitted_bbox = list(last_emitted_bbox or prev_bbox)
+                    lost = False
+                    lost_reason_out.clear()
                 cache[relative_frame] = {"bbox": emitted_bbox, "lost": lost}
                 if lost:
                     lost_count += 1
@@ -2091,13 +2940,19 @@ class ModelHandler:
                         first_lost_reason = (
                             lost_reason_out[-1] if lost_reason_out else None
                         )
-                    prev_lost = True
-                    prev_bbox = None
-                    prev_accepted_target_side = None
-                    prev_latent_prior_state = None
+                    if self.config.recover_after_miss:
+                        # Keep the last accepted box as the reference and let a
+                        # later frame with usable output re-acquire it.
+                        prev_lost = False
+                    else:
+                        prev_lost = True
+                        prev_bbox = None
+                        prev_accepted_target_side = None
+                        prev_latent_prior_state = None
                 else:
                     prev_lost = False
-                    prev_bbox = canonical_tracking_bbox
+                    if canonical_tracking_bbox is not None:
+                        prev_bbox = canonical_tracking_bbox
                     if self.config.output_policy == "adaptive_component_latent_prior_box":
                         if adaptive_diag is not None:
                             prev_latent_prior_state = _latent_prior_state_from_diag(
@@ -2108,6 +2963,36 @@ class ModelHandler:
                         and adaptive_diag is not None
                     ):
                         prev_accepted_target_side = adaptive_diag.get("accepted_target_side")
+                if not lost and emitted_bbox is not None:
+                    last_emitted_bbox = list(emitted_bbox)
+
+            sess["_cache_build"] = False
+            interpolated_frames = self._interpolate_miss_gaps(
+                cache, preload_count, sess
+            )
+            clamped_frames = self._apply_ui_gate_clamp(
+                cache, preload_count, sess, prompt_bbox
+            )
+            if clamped_frames and diag_enabled():
+                log_frame_record({
+                    "event": "ui_gate_clamp_summary",
+                    "cappedFrames": int(clamped_frames),
+                    "chunkLength": int(preload_count),
+                })
+            if interpolated_frames:
+                lost_count = sum(
+                    1 for index in range(int(preload_count)) if cache[index]["lost"]
+                )
+                if first_lost_relative_frame in interpolated_frames:
+                    first_lost_relative_frame = next(
+                        (
+                            index
+                            for index in range(int(preload_count))
+                            if cache[index]["lost"]
+                        ),
+                        None,
+                    )
+                    first_lost_reason = None
 
             if diag_enabled():
                 log_frame_record({
@@ -2343,11 +3228,34 @@ class ModelHandler:
         })
         return response["session_id"]
 
-    def _add_prompt(self, sess, frame_idx):
+    def _scaled_prompt_bbox(self, bbox, sess):
+        """Prompt box scaled about its centre (rod exclusion for small balls)."""
+        scale = float(self.config.prompt_box_scale)
+        if scale == 1.0 or scale <= 0.0:
+            return bbox
+        x1, y1, x2, y2 = [float(value) for value in bbox]
+        center_x = (x1 + x2) / 2.0
+        center_y = (y1 + y2) / 2.0
+        half_w = max((x2 - x1) * scale / 2.0, MIN_BOX_SIDE_PX / 2.0)
+        half_h = max((y2 - y1) * scale / 2.0, MIN_BOX_SIDE_PX / 2.0)
+        return _clamp_bbox(
+            [
+                center_x - half_w,
+                center_y - half_h,
+                center_x + half_w,
+                center_y + half_h,
+            ],
+            sess["image_height"],
+            sess["image_width"],
+        )
+
+    def _add_prompt(self, sess, frame_idx, bbox=None):
+        prompt_bbox = sess["prompt_bbox"] if bbox is None else bbox
+        prompt_bbox = self._scaled_prompt_bbox(prompt_bbox, sess)
         request = build_add_prompt_request(
             sess["session_id"],
             frame_idx,
-            sess["prompt_bbox"],
+            prompt_bbox,
             sess["image_height"],
             sess["image_width"],
             self.config,
@@ -2359,7 +3267,7 @@ class ModelHandler:
                 fallback = build_add_prompt_request(
                     sess["session_id"],
                     frame_idx,
-                    sess["prompt_bbox"],
+                    prompt_bbox,
                     sess["image_height"],
                     sess["image_width"],
                     self.config,

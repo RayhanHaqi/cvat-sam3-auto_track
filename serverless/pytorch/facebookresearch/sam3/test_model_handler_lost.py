@@ -265,3 +265,4 @@ def test_postprocess_valid_ir_supported_ball_remains_valid():
     assert lost is False
     assert bbox is not None
     assert len(bbox) == 4
+

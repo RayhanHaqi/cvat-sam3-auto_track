@@ -64,7 +64,8 @@ def _stream_for_count(count, box_x=0.1):
 def test_init_performs_one_full_chunk_propagation_and_caches_each_frame():
     preload_count = 96
     handler = ModelHandler.__new__(ModelHandler)
-    handler.config = Sam3Config(ir_refine_enabled=False)
+    # This fixture stubs the legacy box selector, not C's mask geometry.
+    handler.config = Sam3Config(output_policy="sam_box", ir_refine_enabled=False)
     handler.predictor = _FakePredictor(_stream_for_count(preload_count))
     handler._sessions = {}
     handler._output_to_bbox = lambda *_args, **_kwargs: [12.0, 12.0, 32.0, 32.0]
@@ -263,7 +264,8 @@ def test_cache_construction_preserves_prompt_snap_back_loss():
     moved = [50.0, 50.0, 70.0, 70.0]
 
     handler = ModelHandler.__new__(ModelHandler)
-    handler.config = Sam3Config(ir_refine_enabled=False)
+    # Keep the mocked selector on the legacy path; the loss guard is shared.
+    handler.config = Sam3Config(output_policy="sam_box", ir_refine_enabled=False)
     handler.predictor = _FakePredictor([
         {"frame_index": 0, "outputs": {"out_boxes_xywh": [[0.5, 0.5, 0.05, 0.05]]}},
         {"frame_index": 1, "outputs": {"out_boxes_xywh": [[0.1, 0.1, 0.05, 0.05]]}},
