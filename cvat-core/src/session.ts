@@ -250,6 +250,15 @@ function buildDuplicatedAPI(prototype) {
                     const result = await PluginRegistry.apiWrapper.call(this, prototype.frames.frameNumbers);
                     return result;
                 },
+                async prefetchChunksForFrames(frameNumbers, currentFrame) {
+                    const result = await PluginRegistry.apiWrapper.call(
+                        this,
+                        prototype.frames.prefetchChunksForFrames,
+                        frameNumbers,
+                        currentFrame,
+                    );
+                    return result;
+                },
                 async preview() {
                     const result = await PluginRegistry.apiWrapper.call(this, prototype.frames.preview);
                     return result;
@@ -428,6 +437,7 @@ export class Session {
         save: () => Promise<FramesMetaData[]>;
         cachedChunks: () => Promise<number[]>;
         frameNumbers: () => Promise<number[]>;
+        prefetchChunksForFrames: (frameNumbers: number[], currentFrame?: number) => Promise<number[]>;
         preview: () => Promise<string>;
         contextImage: (frame: number) => Promise<Record<string, ImageBitmap>>;
         contextImageData: (frame: number) => Promise<ArrayBuffer>;
@@ -495,6 +505,7 @@ export class Session {
             save: Object.getPrototypeOf(this).frames.save.bind(this),
             cachedChunks: Object.getPrototypeOf(this).frames.cachedChunks.bind(this),
             frameNumbers: Object.getPrototypeOf(this).frames.frameNumbers.bind(this),
+            prefetchChunksForFrames: Object.getPrototypeOf(this).frames.prefetchChunksForFrames.bind(this),
             preview: Object.getPrototypeOf(this).frames.preview.bind(this),
             search: Object.getPrototypeOf(this).frames.search.bind(this),
             contextImage: Object.getPrototypeOf(this).frames.contextImage.bind(this),

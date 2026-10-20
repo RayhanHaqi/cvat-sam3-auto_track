@@ -269,6 +269,68 @@ export function verifyRallySeedShape(
         { ok: false, reason: 'invalid_seed_boundary' };
 }
 
+/** Segment for one anchor, or null when the anchor is off the filename contract. */
+export function segmentForAnchor(
+    anchor: number,
+    expectedStartFrames: number[],
+    stopFrame: number,
+): RallySegment | null {
+    if (!expectedStartFrames.includes(anchor)) {
+        return null;
+    }
+    const [segment] = buildRallySegments([anchor], expectedStartFrames, stopFrame);
+    return segment ?? null;
+}
+
+/** Terminal keyframe a completed track must end on for its segment. */
+export function completedTerminalForSegment(segment: RallySegment, stopFrame: number): number {
+    const write = rallySegmentWriteFrames(segment, stopFrame);
+    if (write.boundary !== null) {
+        return write.boundary;
+    }
+    if (write.keyframes.length) {
+        return stopFrame;
+    }
+    return segment.anchor;
+}
+
+export interface RallyCompletedFrameFact {
+    frame: number;
+    keyframe: boolean;
+    outside: boolean;
+}
+
+export type RallyCompletedVerdict =
+    | { ok: true }
+    | { ok: false; frame: number | null; reason: 'incomplete_completed_track' };
+
+/**
+ * Strict frame-structure check for a completed rally track: every interior write
+ * frame must be a non-outside keyframe and the non-final boundary must be an
+ * outside keyframe. Points are tracker output and are not re-verified here.
+ */
+export function verifyRallyCompletedFrames(
+    segment: RallySegment,
+    stopFrame: number,
+    facts: RallyCompletedFrameFact[],
+): RallyCompletedVerdict {
+    const write = rallySegmentWriteFrames(segment, stopFrame);
+    const byFrame = new Map(facts.map((fact) => [fact.frame, fact]));
+    for (const frame of write.keyframes) {
+        const fact = byFrame.get(frame);
+        if (!fact || fact.keyframe !== true || fact.outside !== false) {
+            return { ok: false, frame, reason: 'incomplete_completed_track' };
+        }
+    }
+    if (write.boundary !== null) {
+        const fact = byFrame.get(write.boundary);
+        if (!fact || fact.keyframe !== true || fact.outside !== true) {
+            return { ok: false, frame: write.boundary, reason: 'incomplete_completed_track' };
+        }
+    }
+    return { ok: true };
+}
+
 export type SeedPromptDecision =
     | { action: 'ignore'; committedCount: number }
     | { action: 'commit'; index: number; committedCount: number };
@@ -740,6 +802,41 @@ export function runMultiRallySelfCheck(): void {
             { ...context, expectedStartFrames: [0, 4] },
         ).ok === false,
         'an unreadable own frame is rejected by preflight',
+    );
+
+    // --- completed tracks end exactly on their filename-derived terminal ---
+    const completedSegment = segmentForAnchor(0, [0, 3], 6);
+    assertSelfCheck(
+        completedSegment !== null && completedSegment.endExclusive === 3,
+        'a single anchor maps to its next expected boundary',
+    );
+    assertSelfCheck(segmentForAnchor(1, [0, 3], 6) === null, 'an off-contract anchor has no segment');
+    assertSelfCheck(
+        completedSegment !== null && completedTerminalForSegment(completedSegment, 6) === 3,
+        'a non-final completed track ends on its boundary',
+    );
+    const finalSegment = segmentForAnchor(3, [0, 3], 6);
+    assertSelfCheck(
+        finalSegment !== null && completedTerminalForSegment(finalSegment, 6) === 6,
+        'a final completed track ends on stopFrame',
+    );
+    assertSelfCheck(
+        completedSegment !== null &&
+            verifyRallyCompletedFrames(completedSegment, 6, [
+                { frame: 1, keyframe: true, outside: false },
+                { frame: 2, keyframe: true, outside: false },
+                { frame: 3, keyframe: true, outside: true },
+            ]).ok === true,
+        'a fully keyframed segment verifies as completed',
+    );
+    assertSelfCheck(
+        completedSegment !== null &&
+            verifyRallyCompletedFrames(completedSegment, 6, [
+                { frame: 1, keyframe: true, outside: false },
+                { frame: 2, keyframe: false, outside: false },
+                { frame: 3, keyframe: true, outside: true },
+            ]).ok === false,
+        'a completed track with a missing interior keyframe fails closed',
     );
 
     // eslint-disable-next-line no-console

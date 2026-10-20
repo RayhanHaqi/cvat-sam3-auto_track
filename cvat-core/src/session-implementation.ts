@@ -25,6 +25,7 @@ import {
     getContextImage,
     patchMeta,
     decodePreview,
+    prefetchChunksForFrames,
 } from './frames';
 import Issue from './issue';
 import {
@@ -266,6 +267,16 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
             this: JobClass,
         ): ReturnType<typeof JobClass.prototype.frames.frameNumbers> {
             return getJobFrameNumbers(this.id);
+        },
+    });
+
+    Object.defineProperty(Job.prototype.frames.prefetchChunksForFrames, 'implementation', {
+        value: function prefetchChunksForFramesImplementation(
+            this: JobClass,
+            frameNumbers: number[],
+            currentFrame?: number,
+        ): Promise<number[]> {
+            return prefetchChunksForFrames(this.id, frameNumbers, currentFrame);
         },
     });
 
@@ -933,6 +944,40 @@ export function implementTask(Task: typeof TaskClass): typeof TaskClass {
             this: TaskClass,
         ): ReturnType<typeof TaskClass.prototype.frames.frameNumbers> {
             throw new Error('Not implemented for Task');
+        },
+    });
+
+    Object.defineProperty(Task.prototype.frames.prefetchChunksForFrames, 'implementation', {
+        value: function prefetchChunksForFramesImplementation(
+            this: TaskClass,
+            frameNumbers: number[],
+            currentFrame?: number,
+        ): Promise<number[]> {
+            if (!Array.isArray(frameNumbers) || frameNumbers.some((frame) => !Number.isInteger(frame))) {
+                throw new ArgumentError('Frame numbers must be an array of integers');
+            }
+
+            const framesPerJob = new Map<JobClass, number[]>();
+            for (const frame of frameNumbers) {
+                if (frame < 0 || frame >= this.size) {
+                    continue;
+                }
+
+                const job = this.jobs.find((_job) => _job.startFrame <= frame && _job.stopFrame >= frame);
+                if (job) {
+                    const jobFrames = framesPerJob.get(job) ?? [];
+                    jobFrames.push(frame);
+                    framesPerJob.set(job, jobFrames);
+                }
+            }
+
+            return Promise.all([...framesPerJob.entries()].map(([job, jobFrames]) => (
+                job.frames.prefetchChunksForFrames(
+                    jobFrames,
+                    typeof currentFrame === 'number' && currentFrame >= job.startFrame &&
+                        currentFrame <= job.stopFrame ? currentFrame : undefined,
+                )
+            ))).then((chunkIndexes) => chunkIndexes.flat());
         },
     });
 

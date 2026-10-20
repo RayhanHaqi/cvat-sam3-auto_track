@@ -62,6 +62,7 @@ import withVisibilityHandling from './handle-popover-visibility';
 import ToolsTooltips from './interactor-tooltips';
 import {
     buildRallySeedCandidate,
+    completedTerminalForSegment,
     computeFilenameRallyContract,
     decideSeedPrompt,
     parseRawSourceIndexBig,
@@ -72,10 +73,13 @@ import {
     RallySeedCandidate,
     RallySeedRecord,
     sameRallyPoints,
+    segmentForAnchor,
+    verifyRallyCompletedFrames,
     verifyRallySeedShape,
 } from './multi_rally_segments';
 import {
     AutoTrackBallHistory,
+    AutoTrackValidationVerdict,
     createEmptyAutoTrackHistory,
     CVAT_UI_SAM3_G0_TIMELINE_ENABLED,
     SAM3_V4_TRACKER_ID,
@@ -120,6 +124,12 @@ interface DispatchToProps {
 }
 
 const MIN_SUPPORTED_INTERACTOR_VERSION = 2;
+/**
+ * Track Rallies: a soft-invalid box is still written, but a run of more than this
+ * many consecutive soft boxes is treated as tracker loss for the rally.
+ */
+const AUTO_TRACK_RALLY_MAX_CONSECUTIVE_SOFT = 3;
+
 const core = getCore();
 const CustomPopover = withVisibilityHandling(Popover, 'tools-control');
 
@@ -211,7 +221,16 @@ interface RallyStageContext {
     staged: RallyStagedFrame[];
     history: AutoTrackBallHistory;
     lastStagedPoints: number[];
+    /** Consecutive soft-invalid staged boxes; reset by a valid box or a new segment. */
+    consecutiveSoftFrames: number;
     isFrameDeleted: (frame: number) => boolean;
+}
+
+/** One rally segment discarded by staging validation before anything was written. */
+interface RallySegmentFailure {
+    anchor: number;
+    frame: number | null;
+    reason: string;
 }
 
 interface State {
@@ -320,6 +339,12 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
     private multiRallyPhase: 'idle' | 'staging' | 'cancelling' | 'committing' = 'idle';
 
     private multiRallyCancelRequested = false;
+
+    /**
+     * Segments discarded by the current run, in run order. Only staging stops
+     * (nothing written yet) are recorded here; the run continues past them.
+     */
+    private multiRallyFailures: RallySegmentFailure[] = [];
 
     /** Shared navigation block value to restore, captured when the run acquires it. */
     private multiRallyPriorNavigationBlocked = false;
@@ -2052,8 +2077,10 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         if (!this.mounted || !this.isMultiRallyRunCurrent(context.token)) {
             return;
         }
+        const failed = this.multiRallyFailures.length;
         this.setState({
-            rallyStatus: `Rally ${context.segment.index + 1}/${context.segmentCount} · frame ${frame}`,
+            rallyStatus: `Rally ${context.segment.index + 1}/${context.segmentCount} · frame ${frame}` +
+                `${failed ? ` · ${failed} failed` : ''}`,
         });
     }
 
@@ -2075,6 +2102,11 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                 ].join(' ');
             case 'unexpected_seed_frame':
                 return `A seed track sits where the source file names show no rally start${where}.`;
+            case 'incomplete_completed_track':
+                return [
+                    `A finished rally track is missing keyframes${where}.`,
+                    'Review it and undo if needed; completed rallies are kept.',
+                ].join(' ');
             case 'deleted_frame_in_range':
                 return `A requested rally frame is deleted${where}.`;
             case 'empty_frame_range':
@@ -2134,6 +2166,48 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
             `Partial annotations may exist on the current rally up to frame ${committedThrough}.`,
             'Review them and undo if needed; completed rallies are kept.',
         ].join(' ');
+    }
+
+    /** Records a discarded segment and keeps the progress text honest about it. */
+    private recordRallySegmentFailure(
+        token: number,
+        segment: RallySegment,
+        segmentCount: number,
+        failure: RallySegmentFailure,
+    ): void {
+        this.multiRallyFailures.push(failure);
+        if (!this.mounted || !this.isMultiRallyRunCurrent(token)) {
+            return;
+        }
+        const where = failure.frame === null ? '' : ` at frame ${failure.frame}`;
+        this.setState({
+            rallyStatus: `Rally ${segment.index + 1}/${segmentCount} failed${where} · ` +
+                `${this.multiRallyFailures.length} failed so far · continuing…`,
+        });
+    }
+
+    /**
+     * End-of-run markdown: totals plus one item per discarded rally, reusing the
+     * single stop descriptions so failures read the same everywhere.
+     */
+    private describeRallyRunSummary(trackedCount: number, completedCount: number, skippedCount: number): string {
+        const failures = this.multiRallyFailures;
+        let summary = `Tracked ${trackedCount} ${trackedCount === 1 ? 'rally' : 'rallies'}`;
+        if (completedCount) {
+            summary += `; ${completedCount} already tracked`;
+        }
+        if (skippedCount) {
+            summary += `; skipped ${skippedCount} ${skippedCount > 1 ? 'starts' : 'start'}`;
+        }
+        if (!failures.length) {
+            return `${summary}.`;
+        }
+        const lines = [`${summary}; FAILED ${failures.length}:`];
+        for (const failure of failures) {
+            const reason = this.describeRallyStop(failure.frame, failure.reason);
+            lines.push(`- Rally at frame ${failure.anchor}: ${reason}`);
+        }
+        return lines.join('\n');
     }
 
     private buildJobFrameRange(meta: Awaited<ReturnType<typeof getFramesMeta>>): number[] {
@@ -2214,50 +2288,92 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         return candidates;
     }
 
-    private async runRallySegment(context: RallyStageContext): Promise<void> {
+    /**
+     * Stages one segment and, when staging validated, commits it. A staging stop
+     * (nothing written yet) is returned as a failure record instead of thrown, so
+     * the run can continue with the next rally. Cancels, any commit-phase failure
+     * and non-segment errors still throw and stop the whole run.
+     */
+    private async runRallySegment(context: RallyStageContext): Promise<RallySegmentFailure | null> {
         const { jobInstance } = this.props;
         const write = rallySegmentWriteFrames(context.segment, jobInstance.stopFrame);
         if (!write.keyframes.length && write.boundary === null) {
             // One-frame final rally: the seed already covers it.
-            return;
+            return null;
         }
         if (write.keyframes.length) {
             this.multiRallyPhase = 'staging';
-            await this.stageRallySegment(context);
-            this.assertMultiRallyRunCurrent(context.token);
-            const stagedFrames = context.staged.map((entry) => entry.frame).join(',');
-            if (stagedFrames !== write.keyframes.join(',')) {
-                throw new RallyRunStop(context.segment.anchor, 'zero_progress');
+            try {
+                await this.stageRallySegment(context);
+                this.assertMultiRallyRunCurrent(context.token);
+                const stagedFrames = context.staged.map((entry) => entry.frame).join(',');
+                if (stagedFrames !== write.keyframes.join(',')) {
+                    throw new RallyRunStop(context.segment.anchor, 'zero_progress');
+                }
+            } catch (error: unknown) {
+                // Only a segment-specific staging stop is skippable. A cancel, a
+                // stop that already wrote (committedThrough) or an unknown
+                // network/server error must stop the whole run.
+                if (!(error instanceof RallyRunStop) || error.reason === 'cancelled' ||
+                    error.committedThrough !== null) {
+                    throw error;
+                }
+                return { anchor: context.segment.anchor, frame: error.frame, reason: error.reason };
             }
         }
         // The whole segment validated; only now do we write anything.
         this.multiRallyPhase = 'committing';
         await this.commitRallySegment(context);
+        return null;
     }
 
     private async stageRallySegment(context: RallyStageContext): Promise<void> {
         await this.stageRallySegmentFromTimeline(context);
     }
 
-    private checkRallyGeometry(context: RallyStageContext, frame: number, points: number[]): void {
+    /**
+     * Rallies accept a soft-invalid box (it is staged and later written like any
+     * other frame) but never let it into the reference history. A run of more than
+     * AUTO_TRACK_RALLY_MAX_CONSECUTIVE_SOFT soft frames is treated as tracker loss.
+     * Hard-invalid boxes and non-finite/unusable boxes still stop the segment.
+     */
+    private checkRallyGeometry(
+        context: RallyStageContext,
+        frame: number,
+        points: number[],
+    ): AutoTrackValidationVerdict {
         const shape: MinimalShape = { type: ShapeType.RECTANGLE, points };
         if (isShapeUnusable(shape)) {
             throw new RallyRunStop(frame, 'unusable_box');
         }
         const verdict = validateAutoTrackCandidate(points, context.history);
-        if (verdict !== 'valid') {
+        if (verdict === 'valid') {
+            context.consecutiveSoftFrames = 0;
+            return verdict;
+        }
+        if (verdict === 'hard_invalid') {
             throw new RallyRunStop(frame, 'geometry_rejected');
         }
+        context.consecutiveSoftFrames += 1;
+        if (context.consecutiveSoftFrames > AUTO_TRACK_RALLY_MAX_CONSECUTIVE_SOFT) {
+            throw new RallyRunStop(frame, 'geometry_rejected');
+        }
+        return verdict;
     }
 
     private stageFrame(context: RallyStageContext, frame: number, points: number[]): void {
         if (context.isFrameDeleted(frame)) {
             throw new RallyRunStop(frame, 'deleted_frame');
         }
-        this.checkRallyGeometry(context, frame, points);
+        const verdict = this.checkRallyGeometry(context, frame, points);
         context.staged.push({ frame, points: [...points] });
         context.lastStagedPoints = [...points];
-        context.history = recordValidAutoTrackHistory(context.history, points);
+        // A soft-invalid box is written, but must never become the reference for later frames.
+        if (verdict === 'valid') {
+            context.history = recordValidAutoTrackHistory(context.history, points);
+        } else {
+            context.history = recordInvalidAutoTrackHistory(context.history);
+        }
         this.updateRallyStatus(context, frame);
     }
 
@@ -2338,6 +2454,33 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         const { jobInstance } = this.props;
         const states = await jobInstance.annotations.get(frame, true, []);
         return states.find((_state: ObjectState): boolean => _state.clientID === clientID) ?? null;
+    }
+
+    /**
+     * Strict resume check for one likely-completed track: its first/last must match
+     * the filename-derived segment terminal and every write frame must already be
+     * a keyframe (interior non-outside, boundary outside). Partial tracks fail closed.
+     */
+    private async verifyCompletedRallyTrack(
+        clientID: number,
+        segment: RallySegment,
+        token: number,
+    ): Promise<{ ok: true } | { ok: false; frame: number | null; reason: string }> {
+        const { jobInstance } = this.props;
+        const write = rallySegmentWriteFrames(segment, jobInstance.stopFrame);
+        const frames = write.boundary === null ? write.keyframes : [...write.keyframes, write.boundary];
+        const facts: { frame: number; keyframe: boolean; outside: boolean }[] = [];
+        for (const frame of frames) {
+            this.assertMultiRallyRunCurrent(token);
+            const state = await this.fetchRallyTrackState(clientID, frame);
+            this.assertMultiRallyRunCurrent(token);
+            if (!state) {
+                return { ok: false, frame, reason: 'incomplete_completed_track' };
+            }
+            facts.push({ frame, keyframe: !!state.keyframe, outside: !!state.outside });
+        }
+        const verdict = verifyRallyCompletedFrames(segment, jobInstance.stopFrame, facts);
+        return verdict.ok ? { ok: true } : { ok: false, frame: verdict.frame, reason: verdict.reason };
     }
 
     private async commitRallySegment(context: RallyStageContext): Promise<void> {
@@ -2463,7 +2606,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
             notification.warning({
                 message: 'Track Rallies unavailable',
                 description: 'Track Rallies requires the SAM3 v4 G0 timeline tracker.',
-                duration: 8,
+                duration: null,
             });
             return;
         }
@@ -2473,6 +2616,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         this.multiRallyRunToken += 1;
         const token = this.multiRallyRunToken;
         this.multiRallyCancelRequested = false;
+        this.multiRallyFailures = [];
         this.multiRallyPhase = 'staging';
 
         try {
@@ -2497,7 +2641,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                 notification.error({
                     message: 'Track Rallies not started',
                     description: <CVATMarkdown>{`Frame metadata is unavailable: ${error.message}`}</CVATMarkdown>,
-                    duration: 8,
+                    duration: null,
                 });
                 return;
             }
@@ -2511,7 +2655,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                             {this.describeRallyPreflightFailure(frames[0] ?? null, 'frame_range_mismatch')}
                         </CVATMarkdown>
                     ),
-                    duration: 8,
+                    duration: null,
                 });
                 return;
             }
@@ -2533,7 +2677,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                             {this.describeRallyPreflightFailure(contract.frame, contract.reason)}
                         </CVATMarkdown>
                     ),
-                    duration: 8,
+                    duration: null,
                 });
                 return;
             }
@@ -2542,35 +2686,121 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
             const candidates = await this.discoverRallySeeds(activeTracker, activeLabelID, snapshotFrame);
             this.assertMultiRallyRunCurrent(token);
 
-            const preflight = preflightRallySeeds(candidates, {
+            // Resume partition: pending seeds run, completed tracks are verified skips.
+            const eligible = candidates.filter((candidate) => (
+                candidate.labelID === activeLabelID && candidate.trackerID === activeTracker.id
+            ));
+            const failPreflight = (frame: number | null, reason: string): null => {
+                notification.warning({
+                    message: 'Track Rallies not started',
+                    description: (
+                        <CVATMarkdown>
+                            {this.describeRallyPreflightFailure(frame, reason)}
+                        </CVATMarkdown>
+                    ),
+                    duration: null,
+                });
+                return null;
+            };
+            if (!eligible.length) {
+                failPreflight(null, 'no_seeds_for_active_label_tracker');
+                return;
+            }
+            const countsByFrame = new Map<number, number>();
+            for (const candidate of eligible) {
+                countsByFrame.set(candidate.frame, (countsByFrame.get(candidate.frame) ?? 0) + 1);
+            }
+            for (const [frame, count] of countsByFrame) {
+                if (count > 1) {
+                    failPreflight(frame, 'duplicate_seed_frame');
+                    return;
+                }
+            }
+            const expectedSet = new Set(contract.expectedStartFrames);
+            const sortedEligible = [...eligible].sort((a, b) => a.frame - b.frame);
+            const pendingCandidates: typeof eligible = [];
+            let completedCount = 0;
+            for (const seed of sortedEligible) {
+                if (!expectedSet.has(seed.frame)) {
+                    failPreflight(seed.frame, 'unexpected_seed_frame');
+                    return;
+                }
+                if (isFrameDeleted(seed.frame)) {
+                    failPreflight(seed.frame, 'deleted_seed_frame');
+                    return;
+                }
+                const shape = verifyRallySeedShape(seed, jobInstance.stopFrame);
+                if (shape.ok) {
+                    pendingCandidates.push(seed);
+                    continue;
+                }
+                if (shape.reason !== 'invalid_seed_boundary') {
+                    failPreflight(seed.frame, shape.reason);
+                    return;
+                }
+                const segment = segmentForAnchor(seed.frame, contract.expectedStartFrames, jobInstance.stopFrame);
+                if (!segment) {
+                    failPreflight(seed.frame, 'unexpected_seed_frame');
+                    return;
+                }
+                const terminal = completedTerminalForSegment(segment, jobInstance.stopFrame);
+                if (seed.keyframeFirst !== seed.frame || seed.keyframeLast !== terminal) {
+                    failPreflight(seed.frame, 'invalid_seed_boundary');
+                    return;
+                }
+                const write = rallySegmentWriteFrames(segment, jobInstance.stopFrame);
+                const requested = write.boundary === null ?
+                    write.keyframes : [...write.keyframes, write.boundary];
+                const deleted = requested.find((frame) => isFrameDeleted(frame));
+                if (deleted !== undefined) {
+                    failPreflight(deleted, 'deleted_frame_in_range');
+                    return;
+                }
+                // ponytail: per-frame reads only for likely-completed tracks; pending seeds skip this.
+                const completed = await this.verifyCompletedRallyTrack(seed.clientID, segment, token);
+                this.assertMultiRallyRunCurrent(token);
+                if (!completed.ok) {
+                    failPreflight(completed.frame, completed.reason);
+                    return;
+                }
+                completedCount += 1;
+            }
+
+            const preflight = pendingCandidates.length ? preflightRallySeeds(pendingCandidates, {
                 stopFrame: jobInstance.stopFrame,
                 activeLabelID,
                 activeTrackerID: activeTracker.id,
                 expectedStartFrames: contract.expectedStartFrames,
                 isFrameDeleted,
-            });
-            if (!preflight.ok) {
-                notification.warning({
-                    message: 'Track Rallies not started',
-                    description: (
-                        <CVATMarkdown>
-                            {this.describeRallyPreflightFailure(preflight.frame, preflight.reason)}
-                        </CVATMarkdown>
-                    ),
-                    duration: 8,
+            }) : null;
+            if (preflight && !preflight.ok) {
+                failPreflight(preflight.frame, preflight.reason);
+                return;
+            }
+            const pendingSegments = preflight && preflight.ok ? preflight.segments : [];
+            const pendingSeeds = preflight && preflight.ok ? preflight.seeds : [];
+            if (!pendingSegments.length) {
+                this.assertMultiRallyRunCurrent(token);
+                await fetchAnnotations();
+                notification.success({
+                    message: 'Track Rallies complete',
+                    description: `All ${completedCount} ${completedCount > 1 ? 'rallies' : 'rally'} already tracked; nothing to do.`,
+                    duration: null,
                 });
                 return;
             }
 
-            const segmentCount = preflight.segments.length;
-            const skippedCount = Math.max(0, contract.expectedStartFrames.length - segmentCount);
+            const segmentCount = pendingSegments.length;
+            const accountedCount = completedCount + pendingCandidates.length;
+            const skippedCount = Math.max(0, contract.expectedStartFrames.length - accountedCount);
             const skippedSuffix = skippedCount ?
                 ` · ${skippedCount} ${skippedCount > 1 ? 'starts' : 'start'} skipped` : '';
+            const completedPrefix = completedCount ? `${completedCount} completed · ` : '';
             this.setState({
-                rallyStatus: `${segmentCount} ${segmentCount > 1 ? 'rallies' : 'rally'} queued${skippedSuffix}`,
+                rallyStatus: `${completedPrefix}${segmentCount} ${segmentCount > 1 ? 'rallies' : 'rally'} queued${skippedSuffix}`,
             });
 
-            for (const segment of preflight.segments) {
+            for (const segment of pendingSegments) {
                 if (!this.ownsMultiRallyRun(token)) {
                     return;
                 }
@@ -2584,7 +2814,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                 }
                 // Between segments nothing is being written, so staging is the safe phase.
                 this.multiRallyPhase = 'staging';
-                const seed = preflight.seeds[segment.index];
+                const seed = pendingSeeds[segment.index];
                 const context: RallyStageContext = {
                     token,
                     tracker: activeTracker,
@@ -2596,19 +2826,36 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                     staged: [],
                     history: createEmptyAutoTrackHistory(seed.points),
                     lastStagedPoints: [...seed.points],
+                    consecutiveSoftFrames: 0,
                     isFrameDeleted,
                 };
-                await this.runRallySegment(context);
+                const failure = await this.runRallySegment(context);
+                if (failure) {
+                    // Nothing was written for this rally; keep going and report it at the end.
+                    this.recordRallySegmentFailure(token, segment, segmentCount, failure);
+                }
             }
 
             this.assertMultiRallyRunCurrent(token);
             await fetchAnnotations();
-            notification.success({
-                message: 'Track Rallies complete',
-                description: `Tracked ${segmentCount} ${segmentCount > 1 ? 'rallies' : 'rally'}` +
-                    `${skippedCount ? `; skipped ${skippedCount} ${skippedCount > 1 ? 'starts' : 'start'}` : ''}.`,
-                duration: 4,
-            });
+            const trackedCount = segmentCount - this.multiRallyFailures.length;
+            if (this.multiRallyFailures.length) {
+                notification.warning({
+                    message: 'Track Rallies finished with failures',
+                    description: (
+                        <CVATMarkdown>
+                            {this.describeRallyRunSummary(trackedCount, completedCount, skippedCount)}
+                        </CVATMarkdown>
+                    ),
+                    duration: null,
+                });
+            } else {
+                notification.success({
+                    message: 'Track Rallies complete',
+                    description: this.describeRallyRunSummary(trackedCount, completedCount, skippedCount),
+                    duration: null,
+                });
+            }
         } catch (error: any) {
             if (this.ownsMultiRallyRun(token)) {
                 const stop = error instanceof RallyRunStop ? error : null;
@@ -2628,7 +2875,7 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                                     {stop ? this.describeRallyStop(stop.frame, stop.reason) : String(error.message)}
                                 </CVATMarkdown>
                             ),
-                            duration: 8,
+                            duration: null,
                         });
                     } else {
                         notification.error({

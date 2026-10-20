@@ -38,10 +38,22 @@ export const AUTO_TRACK_BALL_VALIDATION_CONFIG: AutoTrackBallValidationConfig = 
     maxVelocityResidualScale: 4.0,
 };
 
+/**
+ * Robust size reference: number of recent valid boxes kept per track, the seed
+ * box being the first entry. Gates compare against the median of this window,
+ * so a few transiently tiny masks (SAM3 reported 2.9 px next to 7 px ones)
+ * cannot collapse the reference the way a last-valid-box reference does: eight
+ * entries mean a three-frame excursion cannot move the median, and the seed box
+ * only leaves the window once eight boxes were accepted.
+ */
+export const AUTO_TRACK_BALL_REFERENCE_WINDOW = 8;
+
 export interface AutoTrackBallHistory {
     lastValidPoints: number[] | null;
     previousCenter: [number, number] | null;
     consecutiveInvalidFrames: number;
+    /** Recent valid boxes, oldest first, seeded with the seed box. */
+    recentValidPoints: number[][];
 }
 
 export interface LossTerminationShapeSource {
@@ -81,12 +93,59 @@ function centerDistance(a: number[], b: number[]): number {
     return Math.hypot(ax - bx, ay - by);
 }
 
+/** Median of a numeric list; 0 for an empty list. */
+export function medianValue(values: number[]): number {
+    if (!values.length) {
+        return 0;
+    }
+    const sorted = [...values].sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 1) {
+        return sorted[middle];
+    }
+    return (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+export interface AutoTrackBallReferenceGeometry {
+    area: number;
+    diagonal: number;
+    aspectRatio: number;
+}
+
+/**
+ * Median geometry over recent valid boxes: area, diagonal and aspect ratio are
+ * each reduced by their own median, so one outlier box cannot skew the size,
+ * displacement or shape reference. `null` for an empty list.
+ */
+export function medianReferenceGeometry(pointsList: number[][]): AutoTrackBallReferenceGeometry | null {
+    if (!pointsList.length) {
+        return null;
+    }
+    return {
+        area: medianValue(pointsList.map((points) => boxArea(points))),
+        diagonal: medianValue(pointsList.map((points) => boxDiagonal(points))),
+        aspectRatio: medianValue(pointsList.map((points) => boxAspectRatio(points))),
+    };
+}
+
+/**
+ * Reference window of a track: recent valid boxes with the seed box first.
+ * Histories created before this window existed fall back to the last valid box.
+ */
+export function getAutoTrackReferenceWindow(history: AutoTrackBallHistory): number[][] {
+    if (history.recentValidPoints && history.recentValidPoints.length > 0) {
+        return history.recentValidPoints;
+    }
+    return history.lastValidPoints ? [history.lastValidPoints] : [];
+}
+
 export function createEmptyAutoTrackHistory(seedPoints: number[]): AutoTrackBallHistory {
     const center = boxCenter(seedPoints);
     return {
         lastValidPoints: [...seedPoints],
         previousCenter: center,
         consecutiveInvalidFrames: 0,
+        recentValidPoints: [[...seedPoints]],
     };
 }
 
@@ -96,11 +155,12 @@ export function validateAutoTrackCandidate(
     config: AutoTrackBallValidationConfig = AUTO_TRACK_BALL_VALIDATION_CONFIG,
 ): AutoTrackValidationVerdict {
     const reference = history.lastValidPoints;
-    if (!reference || reference.length < 4) {
+    const geometry = medianReferenceGeometry(getAutoTrackReferenceWindow(history));
+    if (!reference || reference.length < 4 || !geometry) {
         return 'valid';
     }
 
-    const refArea = Math.max(1, boxArea(reference));
+    const refArea = Math.max(1, geometry.area);
     const candArea = boxArea(candidatePoints);
     const areaRatio = candArea / refArea;
 
@@ -108,7 +168,7 @@ export function validateAutoTrackCandidate(
         return 'hard_invalid';
     }
 
-    const refDiag = boxDiagonal(reference);
+    const refDiag = geometry.diagonal;
     const displacement = centerDistance(reference, candidatePoints);
     const displacementScale = displacement / refDiag;
 
@@ -116,7 +176,6 @@ export function validateAutoTrackCandidate(
         return 'hard_invalid';
     }
 
-    const refAspect = boxAspectRatio(reference);
     const candAspect = boxAspectRatio(candidatePoints);
     if (candAspect > config.maxAspectRatio * 1.5) {
         return 'hard_invalid';
@@ -126,7 +185,7 @@ export function validateAutoTrackCandidate(
     if (areaRatio < config.minAreaRatio || areaRatio > config.maxAreaRatio) {
         softSignals += 1;
     }
-    if (Math.abs(candAspect - refAspect) > config.maxAspectRatioDelta) {
+    if (Math.abs(candAspect - geometry.aspectRatio) > config.maxAspectRatioDelta) {
         softSignals += 1;
     }
     if (displacementScale > config.maxCenterDisplacementScale) {
@@ -163,10 +222,12 @@ export function recordValidAutoTrackHistory(
     validPoints: number[],
 ): AutoTrackBallHistory {
     const center = boxCenter(validPoints);
+    const window = [...getAutoTrackReferenceWindow(history), [...validPoints]];
     return {
         lastValidPoints: [...validPoints],
         previousCenter: center,
         consecutiveInvalidFrames: 0,
+        recentValidPoints: window.slice(-AUTO_TRACK_BALL_REFERENCE_WINDOW),
     };
 }
 
@@ -310,4 +371,121 @@ export function validatePreloadTimeline(
         return { valid: false, reason: 'preloaded_until_mismatch' };
     }
     return { valid: true, timeline, summary };
+}
+
+/* istanbul ignore next */
+function assertAutoTrackBallSelfCheck(condition: unknown, message: string): void {
+    if (!condition) {
+        throw new Error(`auto-track ball validation self-check failed: ${message}`);
+    }
+}
+
+/**
+ * The robust-reference contract, checkable without a test framework (same style
+ * as `runMultiRallySelfCheck`):
+ *
+ *   node --experimental-strip-types -e \
+ *     "import('./auto_track_ball_validation.ts').then((m) => m.runAutoTrackBallValidationSelfCheck())"
+ */
+/* istanbul ignore next */
+export function runAutoTrackBallValidationSelfCheck(): void {
+    const square = (side: number, cx: number, cy: number = 0): number[] => [
+        cx - side / 2,
+        cy - side / 2,
+        cx + side / 2,
+        cy + side / 2,
+    ];
+
+    // --- medians ---
+    assertAutoTrackBallSelfCheck(medianValue([]) === 0, 'median of an empty list is 0');
+    assertAutoTrackBallSelfCheck(medianValue([3]) === 3, 'median of a single value');
+    assertAutoTrackBallSelfCheck(medianValue([3, 1, 2]) === 2, 'odd-length median');
+    assertAutoTrackBallSelfCheck(medianValue([4, 1, 3, 2]) === 2.5, 'even-length median averages the middle pair');
+    assertAutoTrackBallSelfCheck(medianReferenceGeometry([]) === null, 'an empty window has no geometry');
+
+    // --- the production rally: tiny transient masks, then recovery ---
+    // Seed 6x6, then 7.5, 7.2, 7.8, 5.0, 5.3, 3.7, 2.9, 3.2, 7.6, 8.5, 10.0 px
+    // squares moving about 2 px/frame, then 6.2 and 8.5 px/frame.
+    const sides = [7.5, 7.2, 7.8, 5.0, 5.3, 3.7, 2.9, 3.2, 7.6, 8.5, 10.0];
+    const steps = [2, 2, 2, 2, 2, 2, 2, 2, 6.2, 8.5, 8.5];
+    const expected: AutoTrackValidationVerdict[] = [
+        'valid', 'valid', 'valid', 'valid', 'valid',
+        'soft_invalid', 'soft_invalid', 'soft_invalid', 'valid', 'valid', 'valid',
+    ];
+    let history = createEmptyAutoTrackHistory(square(6, 0));
+    let cursor = 0;
+    for (let index = 0; index < sides.length; index += 1) {
+        cursor += steps[index];
+        const candidate = square(sides[index], cursor);
+        const verdict = validateAutoTrackCandidate(candidate, history);
+        assertAutoTrackBallSelfCheck(
+            verdict === expected[index],
+            `production rally frame ${index} (side ${sides[index]} px) is ${verdict}, expected ${expected[index]}`,
+        );
+        if (verdict === 'valid') {
+            history = recordValidAutoTrackHistory(history, candidate);
+        } else {
+            history = recordInvalidAutoTrackHistory(history);
+        }
+    }
+
+    // --- a stable median still rejects real jumps ---
+    let stable = createEmptyAutoTrackHistory(square(8, 0));
+    let stableCursor = 0;
+    for (let index = 0; index < AUTO_TRACK_BALL_REFERENCE_WINDOW; index += 1) {
+        stableCursor += 2;
+        const box = square(8, stableCursor);
+        assertAutoTrackBallSelfCheck(
+            validateAutoTrackCandidate(box, stable) === 'valid',
+            `stable frame ${index} stays valid`,
+        );
+        stable = recordValidAutoTrackHistory(stable, box);
+    }
+    const medianDiagonal = boxDiagonal(square(8, 0));
+    assertAutoTrackBallSelfCheck(
+        validateAutoTrackCandidate(square(medianDiagonal * 5, stableCursor), stable) === 'hard_invalid',
+        'a 5x diagonal jump from a stable median is hard-invalid',
+    );
+    assertAutoTrackBallSelfCheck(
+        validateAutoTrackCandidate(square(medianDiagonal / 5 / Math.SQRT2, stableCursor), stable) === 'hard_invalid',
+        'a 5x diagonal shrink from a stable median is hard-invalid',
+    );
+    assertAutoTrackBallSelfCheck(
+        validateAutoTrackCandidate(square(8, stableCursor + medianDiagonal * 5 + 1), stable) === 'hard_invalid',
+        'a move beyond the hard displacement limit is hard-invalid',
+    );
+    assertAutoTrackBallSelfCheck(
+        validateAutoTrackCandidate(square(8 * Math.SQRT1_2, stableCursor), stable) === 'valid',
+        'a half-area box stays valid, inside the soft band',
+    );
+    assertAutoTrackBallSelfCheck(
+        validateAutoTrackCandidate(square(8 * Math.sqrt(0.3), stableCursor), stable) === 'soft_invalid',
+        'a 0.3-area box is soft-invalid, not hard-invalid',
+    );
+
+    // --- window mechanics ---
+    assertAutoTrackBallSelfCheck(
+        createEmptyAutoTrackHistory(square(6, 0)).recentValidPoints.length === 1,
+        'the reference window starts with the seed box',
+    );
+    let windowed = createEmptyAutoTrackHistory(square(6, 0));
+    for (let index = 0; index < AUTO_TRACK_BALL_REFERENCE_WINDOW + 4; index += 1) {
+        windowed = recordValidAutoTrackHistory(windowed, square(6 + index, index * 2));
+    }
+    assertAutoTrackBallSelfCheck(
+        windowed.recentValidPoints.length === AUTO_TRACK_BALL_REFERENCE_WINDOW,
+        'the reference window is capped',
+    );
+    assertAutoTrackBallSelfCheck(
+        windowed.recentValidPoints[0][2] - windowed.recentValidPoints[0][0] === 10,
+        'the oldest entry leaves the window first',
+    );
+    const invalidOnly = recordInvalidAutoTrackHistory(windowed);
+    assertAutoTrackBallSelfCheck(
+        invalidOnly.recentValidPoints === windowed.recentValidPoints && invalidOnly.consecutiveInvalidFrames === 1,
+        'an invalid frame never enters the reference window',
+    );
+
+    // eslint-disable-next-line no-console
+    console.log('auto-track ball validation self-check passed');
 }

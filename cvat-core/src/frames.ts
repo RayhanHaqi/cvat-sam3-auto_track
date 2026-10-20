@@ -37,7 +37,38 @@ const frameDataCache: Record<string, {
     }>;
     getChunk: (chunkIndex: number, quality: ChunkQuality) => Promise<ArrayBuffer>;
     getMeta: () => Promise<FramesMetaData>;
+    backgroundPrefetch: BackgroundChunkPrefetch;
 }> = {};
+
+type FrameDataCacheEntry = (typeof frameDataCache)[string];
+
+// how many chunks the background prefetch may hold decoded for the requested frames
+const BACKGROUND_PREFETCH_CHUNKS_LIMIT = 3;
+// how long to wait before re-checking the decoder when it is busy, but there is no
+// visible frame chunk request to wait for
+const BACKGROUND_PREFETCH_RETRY_TIMEOUT = 500;
+
+/**
+ * State of the background chunk prefetch requested by `prefetchChunksForFrames`.
+ * It is intentionally kept separate from `activeChunkRequest` and
+ * `latestFrameDecodeRequest`, which belong to the visible frame path.
+ */
+interface BackgroundChunkPrefetch {
+    // chunk indexes we want to keep decoded for the latest request
+    targets: number[];
+    // targets which are neither decoded nor are being downloaded/decoded right now
+    queued: number[];
+    // the chunk which is being downloaded/decoded by the background prefetch right now
+    inFlight: number | null;
+    // chunks decoded by the background prefetch and still held in the decoder
+    decodedChunks: number[];
+    // the chunk with the frame currently opened in the player
+    visibleChunk: number | null;
+    // a retry is already scheduled
+    retryScheduled: boolean;
+    // resolves the chunk request announced for the chunk which is being decoded
+    releaseDecodeRequest: (() => void) | null;
+}
 
 // frame meta data storage by job id
 const frameMetaCacheSync: Record<string, FramesMetaData> = {};
@@ -944,6 +975,15 @@ export async function getFrame(
                 }
                 return cached;
             },
+            backgroundPrefetch: {
+                targets: [],
+                queued: [],
+                inFlight: null,
+                decodedChunks: [],
+                visibleChunk: null,
+                retryScheduled: false,
+                releaseDecodeRequest: null,
+            },
         };
     }
 
@@ -1066,6 +1106,268 @@ export async function getJobFrameNumbers(jobID: number): Promise<number[]> {
 
     const { segmentFrameNumbers } = frameDataCache[jobID];
     return segmentFrameNumbers.slice(0);
+}
+
+function dropStalePrefetchedChunks(entry: FrameDataCacheEntry): void {
+    const { backgroundPrefetch } = entry;
+    const staleChunks = backgroundPrefetch.decodedChunks.filter((chunkIndex) => (
+        // a chunk may be released by the regular decoded chunks cache
+        !entry.provider.isChunkCached(chunkIndex) ||
+        // the chunk left the requested window, but never release the displayed one
+        (chunkIndex !== backgroundPrefetch.visibleChunk &&
+            !backgroundPrefetch.targets.includes(chunkIndex))
+    ));
+
+    if (!staleChunks.length) {
+        return;
+    }
+
+    entry.provider.dropChunks(staleChunks);
+    backgroundPrefetch.decodedChunks = backgroundPrefetch.decodedChunks
+        .filter((chunkIndex) => !staleChunks.includes(chunkIndex));
+}
+
+function announceDecodedChunkRequest(entry: FrameDataCacheEntry): void {
+    // The decoder decodes one chunk at a time and replaces the callbacks of an in-flight
+    // decode as soon as the same chunk is requested again. To keep the background decode
+    // intact, it is announced as activeChunkRequest before being requested: then the
+    // visible frame path waits for it instead of asking for the same chunk once more,
+    // exactly like it waits for the chunk request of its own prefetch.
+    const { backgroundPrefetch } = entry;
+    let request: Promise<void> | null = null;
+    let release: (() => void) | null = null;
+
+    request = new Promise<void>((resolve) => {
+        release = (): void => {
+            resolve();
+            backgroundPrefetch.releaseDecodeRequest = null;
+            if (entry.activeChunkRequest === request) {
+                entry.activeChunkRequest = null;
+            }
+        };
+    });
+
+    entry.activeChunkRequest = request;
+    backgroundPrefetch.releaseDecodeRequest = release;
+}
+
+function runBackgroundPrefetch(jobID: number): void {
+    const entry = frameDataCache[jobID];
+    if (!entry) {
+        return;
+    }
+
+    const { backgroundPrefetch } = entry;
+    if (backgroundPrefetch.inFlight !== null) {
+        // one chunk at a time. Also, a decode request which is not known to the decoder
+        // anymore must release the chunk request announced for it, otherwise the visible
+        // frame path would wait for it forever
+        if (
+            backgroundPrefetch.releaseDecodeRequest &&
+            entry.provider.pendingChunkIndex() !== backgroundPrefetch.inFlight
+        ) {
+            backgroundPrefetch.inFlight = null;
+            backgroundPrefetch.releaseDecodeRequest();
+        } else {
+            return;
+        }
+    }
+
+    // wait until the visible frame path releases the decoder, then continue with the queue
+    const retryWhenDecoderIsFree = (): void => {
+        if (
+            backgroundPrefetch.retryScheduled ||
+            backgroundPrefetch.inFlight !== null ||
+            !backgroundPrefetch.queued.length
+        ) {
+            return;
+        }
+
+        backgroundPrefetch.retryScheduled = true;
+        const retry = (): void => {
+            const current = frameDataCache[jobID];
+            if (current) {
+                current.backgroundPrefetch.retryScheduled = false;
+                runBackgroundPrefetch(jobID);
+            }
+        };
+
+        const visibleChunkRequest = entry.activeChunkRequest;
+        if (visibleChunkRequest) {
+            // the visible frame path has priority, wait until it releases the decoder
+            visibleChunkRequest.then(retry, retry);
+        } else {
+            // the decoder is busy with a request which is not tracked by activeChunkRequest
+            setTimeout(retry, BACKGROUND_PREFETCH_RETRY_TIMEOUT);
+        }
+    };
+
+    while (backgroundPrefetch.queued.length) {
+        if (entry.decodeForward) {
+            // the player is running, the visible frame path owns the decoder then
+            retryWhenDecoderIsFree();
+            return;
+        }
+
+        if (entry.activeChunkRequest || entry.provider.pendingChunkIndex() !== null) {
+            // the visible frame path owns the decoder, retry when it is done
+            retryWhenDecoderIsFree();
+            return;
+        }
+
+        const chunkIndex = backgroundPrefetch.queued.shift() as number;
+        if (entry.provider.isChunkCached(chunkIndex)) {
+            // the chunk is already decoded, it does not need to be accounted as
+            // prefetched: only chunks decoded here are released when they become stale
+            continue;
+        }
+
+        backgroundPrefetch.inFlight = chunkIndex;
+        entry.getChunk(chunkIndex, ChunkQuality.COMPRESSED).then((chunk: ArrayBuffer) => {
+            if (frameDataCache[jobID]?.backgroundPrefetch !== backgroundPrefetch) {
+                // the frame data cache entry is not relevant anymore
+                return;
+            }
+
+            if (!backgroundPrefetch.targets.includes(chunkIndex)) {
+                // the user moved on while the chunk was downloading
+                backgroundPrefetch.inFlight = null;
+                runBackgroundPrefetch(jobID);
+                return;
+            }
+
+            if (
+                entry.decodeForward || entry.activeChunkRequest ||
+                entry.provider.pendingChunkIndex() !== null ||
+                entry.provider.isChunkCached(chunkIndex)
+            ) {
+                // the visible frame path took the decoder over while the chunk was downloading
+                backgroundPrefetch.inFlight = null;
+                backgroundPrefetch.queued.unshift(chunkIndex);
+                retryWhenDecoderIsFree();
+                return;
+            }
+
+            announceDecodedChunkRequest(entry);
+            entry.provider.requestDecodeBlock(
+                chunk,
+                chunkIndex,
+                entry.segmentFrameNumbers.slice(
+                    chunkIndex * entry.chunkSize,
+                    (chunkIndex + 1) * entry.chunkSize,
+                ),
+                // decoded frames are not needed here, the chunk is prefetched for later use
+                () => {},
+                () => {
+                    if (backgroundPrefetch.releaseDecodeRequest) {
+                        backgroundPrefetch.releaseDecodeRequest();
+                    }
+                    if (frameDataCache[jobID]?.backgroundPrefetch === backgroundPrefetch) {
+                        if (backgroundPrefetch.inFlight === chunkIndex) {
+                            backgroundPrefetch.inFlight = null;
+                        }
+                        if (
+                            entry.provider.isChunkCached(chunkIndex) &&
+                            !backgroundPrefetch.decodedChunks.includes(chunkIndex)
+                        ) {
+                            backgroundPrefetch.decodedChunks.push(chunkIndex);
+                        }
+
+                        dropStalePrefetchedChunks(entry);
+                        runBackgroundPrefetch(jobID);
+                    }
+                },
+                () => {
+                    // the request was rejected, most likely because the visible frame path
+                    // requested another chunk in the meantime
+                    if (backgroundPrefetch.releaseDecodeRequest) {
+                        backgroundPrefetch.releaseDecodeRequest();
+                    }
+                    if (frameDataCache[jobID]?.backgroundPrefetch === backgroundPrefetch) {
+                        if (backgroundPrefetch.inFlight === chunkIndex) {
+                            backgroundPrefetch.inFlight = null;
+                        }
+                        runBackgroundPrefetch(jobID);
+                    }
+                },
+            );
+        }).catch(() => {
+            if (frameDataCache[jobID]?.backgroundPrefetch !== backgroundPrefetch) {
+                return;
+            }
+
+            backgroundPrefetch.inFlight = null;
+            // a failed download drops the queued work, the next request recreates it
+            backgroundPrefetch.queued = [];
+        });
+        return;
+    }
+}
+
+/**
+ * Requests background download and decode of the chunks which hold the given frames.
+ * Intended for frames which are likely to be opened soon, for example upcoming rally
+ * starts. The chunks are decoded one at a time, only when the visible frame path is
+ * idle, and at most `BACKGROUND_PREFETCH_CHUNKS_LIMIT` of them are held. Chunks which
+ * are already decoded or in progress are skipped. The call does not wait for the
+ * downloads to finish, it resolves with the chunk indexes which were queued.
+ *
+ * @param jobID the job to prefetch frames in
+ * @param frameNumbers frames to prepare chunks for
+ * @param currentFrame the frame currently opened in the player, its chunk is never
+ * prefetched and never evicted by the background prefetch
+ */
+export async function prefetchChunksForFrames(
+    jobID: number,
+    frameNumbers: number[],
+    currentFrame?: number,
+): Promise<number[]> {
+    if (!Array.isArray(frameNumbers) || frameNumbers.some((frame) => !Number.isInteger(frame))) {
+        throw new ArgumentError('Frame numbers must be an array of integers');
+    }
+
+    const entry = frameDataCache[jobID];
+    if (!entry) {
+        // no frame was requested for this job yet, nothing can be prefetched
+        return [];
+    }
+
+    const meta = await entry.getMeta();
+    const { jobStartFrame, backgroundPrefetch } = entry;
+    const chunkIndexForFrame = (frame: number): number | null => {
+        try {
+            return meta.getFrameChunkIndex(meta.getDataFrameNumber(frame - jobStartFrame));
+        } catch (error) {
+            // the frame does not belong to the job
+            return null;
+        }
+    };
+
+    if (Number.isInteger(currentFrame)) {
+        const visibleChunk = chunkIndexForFrame(currentFrame as number);
+        if (visibleChunk !== null) {
+            backgroundPrefetch.visibleChunk = visibleChunk;
+        }
+    }
+
+    backgroundPrefetch.targets = _
+        .uniq(frameNumbers
+            .map((frame) => chunkIndexForFrame(frame))
+            .filter((chunkIndex): chunkIndex is number => chunkIndex !== null))
+        .filter((chunkIndex) => chunkIndex !== backgroundPrefetch.visibleChunk)
+        .sort((chunkIndex1, chunkIndex2) => chunkIndex1 - chunkIndex2)
+        .slice(0, BACKGROUND_PREFETCH_CHUNKS_LIMIT);
+
+    // an in-flight chunk cannot be cancelled, it is accounted for in the completion callbacks
+    backgroundPrefetch.queued = backgroundPrefetch.targets.filter((chunkIndex) => (
+        chunkIndex !== backgroundPrefetch.inFlight && !entry.provider.isChunkCached(chunkIndex)
+    ));
+
+    const queuedChunks = backgroundPrefetch.queued.slice(0);
+    dropStalePrefetchedChunks(entry);
+    runBackgroundPrefetch(jobID);
+
+    return queuedChunks;
 }
 
 export function clear(jobID: number): void {

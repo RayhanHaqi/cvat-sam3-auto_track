@@ -437,4 +437,39 @@ export class FrameDecoder {
             ...(chunkIsBeingDecoded !== null ? [chunkIsBeingDecoded] : []),
         ).sort((a, b) => a - b);
     }
+
+    public pendingChunkIndex(): number | null {
+        // the chunk which is being decoded right now or which is requested to be decoded next
+        if (this.chunkIsBeingDecoded !== null) {
+            return this.chunkIsBeingDecoded.chunkIndex;
+        }
+
+        if (this.requestedChunkToDecode !== null) {
+            return this.requestedChunkToDecode.chunkIndex;
+        }
+
+        return null;
+    }
+
+    public dropChunks(chunkIndexes: number[]): void {
+        // releases decoded frames of the given chunks. It must not be used for the chunk which is
+        // displayed right now, because a new request for the same frame will have to decode the
+        // chunk again. Chunks which are not decoded yet are ignored.
+        for (const chunkIndex of chunkIndexes) {
+            const decodedFrames = this.decodedChunks[chunkIndex];
+            if (typeof decodedFrames === 'undefined') {
+                continue;
+            }
+
+            for (const frame of Object.keys(decodedFrames)) {
+                const data = decodedFrames[frame];
+                if (data instanceof ImageBitmap) {
+                    data.close();
+                }
+            }
+
+            delete this.decodedChunks[chunkIndex];
+            this.orderedStack = this.orderedStack.filter((index) => index !== chunkIndex);
+        }
+    }
 }

@@ -37,6 +37,7 @@ import {
 } from 'reducers';
 import isAbleToChangeFrame from 'utils/is-able-to-change-frame';
 import { findNextRallyFrame, findPrevRallyFrame } from 'utils/rally-navigation';
+import { prefetchNextRallyChunks } from 'utils/rally-chunk-prefetch';
 import { KeyMap } from 'utils/mousetrap-react';
 import { switchToolsBlockerState } from 'actions/settings-actions';
 import { writeLatestFrame } from 'utils/remember-latest-frame';
@@ -50,6 +51,7 @@ interface StateToProps {
     jobInstance: Job;
     frameIsDeleted: boolean;
     frameNumber: number;
+    frameNumbers: number[];
     frameFilename: string;
     meta: FramesMetaData | null;
     frameStep: number;
@@ -131,7 +133,12 @@ function mapStateToProps(state: CombinedState): StateToProps {
                 history,
                 filters: annotationFilters,
             },
-            job: { instance: jobInstance, queryParameters: { initialOpenGuide }, meta },
+            job: {
+                instance: jobInstance,
+                frameNumbers: jobFrameNumbers,
+                queryParameters: { initialOpenGuide },
+                meta,
+            },
             canvas: { ready: canvasIsReady, instance: canvasInstance, activeControl },
             workspace,
         },
@@ -168,6 +175,7 @@ function mapStateToProps(state: CombinedState): StateToProps {
         hoveredChapter,
         saving,
         frameNumber,
+        frameNumbers: jobFrameNumbers,
         frameFilename,
         meta,
         jobInstance: jobInstance as Job,
@@ -304,15 +312,26 @@ class AnnotationTopBarContainer extends React.PureComponent<Props> {
         });
 
         window.addEventListener('beforeunload', this.beforeUnloadCallback);
+        this.prefetchUpcomingRallyChunks();
     }
 
     public componentDidUpdate(prevProps: Props): void {
-        const { autoSaveInterval } = this.props;
+        const {
+            autoSaveInterval, frameNumber, jobInstance,
+        } = this.props;
 
         if (autoSaveInterval !== prevProps.autoSaveInterval) {
             if (this.autoSaveInterval) window.clearInterval(this.autoSaveInterval);
             this.autoSaveInterval = window.setInterval(this.autoSave.bind(this), autoSaveInterval);
         }
+
+        if (
+            prevProps.frameNumber !== frameNumber ||
+            prevProps.jobInstance.id !== jobInstance.id
+        ) {
+            this.prefetchUpcomingRallyChunks();
+        }
+
         this.handlePlayIfNecessary();
     }
 
@@ -754,6 +773,19 @@ class AnnotationTopBarContainer extends React.PureComponent<Props> {
         }
         return undefined;
     };
+
+    private prefetchUpcomingRallyChunks(): void {
+        const {
+            frameFetching, frameNumbers, jobInstance, meta, frameNumber,
+        } = this.props;
+
+        if (frameFetching || !meta) {
+            return;
+        }
+
+        // ask cvat-core to download and decode the chunks of the upcoming rally starts
+        prefetchNextRallyChunks(jobInstance, meta, frameNumbers, frameNumber);
+    }
 
     private autoSave(): void {
         const { autoSave, saving, onSaveAnnotation } = this.props;
