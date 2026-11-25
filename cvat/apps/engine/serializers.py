@@ -846,6 +846,7 @@ class JobReadSerializer(serializers.ModelSerializer):
             'created_date', 'updated_date', 'issues', 'labels', 'type', 'organization',
             'target_storage', 'source_storage', 'assignee_updated_date', 'parent_job_id',
             'consensus_replicas', 'replicas_count',
+            'annotation_revision', 'completed_annotation_revision',
         )
         read_only_fields = fields
         list_serializer_class = JobReadListSerializer
@@ -1148,9 +1149,16 @@ class JobWriteSerializer(WriteOnceMixin, serializers.ModelSerializer):
 
         return job
 
+    @transaction.atomic
     def update(self, instance: models.Job, validated_data: dict[str, Any]):
+        # Serialize Completed against annotation writes (which lock the same row).
+        instance = models.Job.objects.select_for_update().get(pk=instance.pk)
         stage = validated_data.get('stage', instance.stage)
         state = validated_data.get('state', models.StateChoice.NEW if stage != instance.stage else instance.state)
+        if 'stage' in validated_data or 'state' in validated_data:
+            validated_data['completed_annotation_revision'] = (
+                instance.annotation_revision if state == models.StateChoice.COMPLETED else None
+            )
 
         if 'stage' in validated_data or 'state' in validated_data:
             if stage == models.StageChoice.ANNOTATION:

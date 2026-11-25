@@ -1156,6 +1156,10 @@ class Job(TimestampedModel, AssignableModel, FileSystemRelatedModel):
         default=StageChoice.ANNOTATION)
     state = models.CharField(max_length=32, choices=StateChoice.choices(),
         default=StateChoice.NEW)
+    # A legacy Completed job has no reviewed revision until a new explicit
+    # completion. Annotation changes advance the revision and reopen the job.
+    annotation_revision = models.PositiveBigIntegerField(default=0)
+    completed_annotation_revision = models.PositiveBigIntegerField(null=True, default=None)
     type = models.CharField(max_length=32, choices=JobType.choices(),
         default=JobType.ANNOTATION)
     parent_job = models.ForeignKey(

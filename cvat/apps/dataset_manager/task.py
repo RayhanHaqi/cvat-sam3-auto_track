@@ -435,7 +435,21 @@ class JobAnnotation:
     def _set_updated_date(self):
         db_task = self.db_job.segment.task
         with transaction.atomic():
-            self.db_job.touch()
+            # All job annotation writes reach this method inside their write
+            # transaction. The same row lock guards a concurrent Completed PATCH.
+            db_job = models.Job.objects.select_for_update().get(pk=self.db_job.pk)
+            db_job.annotation_revision += 1
+            db_job.completed_annotation_revision = None
+            if db_job.state == models.StateChoice.COMPLETED:
+                db_job.state = models.StateChoice.IN_PROGRESS
+                db_job.status = (models.StatusChoice.ANNOTATION if db_job.stage == models.StageChoice.ANNOTATION
+                                 else models.StatusChoice.VALIDATION)
+            db_job.save(update_fields=['annotation_revision', 'completed_annotation_revision', 'state', 'status', 'updated_date'])
+            self.db_job.annotation_revision = db_job.annotation_revision
+            self.db_job.completed_annotation_revision = None
+            self.db_job.state = db_job.state
+            self.db_job.status = db_job.status
+            self.db_job.updated_date = db_job.updated_date
             db_task.touch()
             if db_project := db_task.project:
                 db_project.touch()

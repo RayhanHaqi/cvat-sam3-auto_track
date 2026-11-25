@@ -64,6 +64,7 @@ from cvat.apps.engine.models import (
     Segment,
     SortingMethod,
     StageChoice,
+    StateChoice,
     StatusChoice,
     StorageChoice,
     StorageMethodChoice,
@@ -436,6 +437,80 @@ class JobPartialUpdateAPITestCase(ApiTestBase):
         data = {"assignee": self.user.id}
         response = self._run_api_v2_jobs_id(self.job.id, self.admin, data)
         self._check_request(response, data)
+
+    def test_completed_binds_annotation_revision_and_edit_reopens_job(self):
+        from cvat.apps.dataset_manager.task import delete_job_data, put_job_data
+        from cvat.apps.engine.serializers import JobWriteSerializer
+
+        # Old Completed jobs are not retroactively certified after migration.
+        self.job.state = StateChoice.COMPLETED
+        self.job.save(update_fields=['state'])
+        self.assertIsNone(self.job.completed_annotation_revision)
+
+        def complete():
+            serializer = JobWriteSerializer(self.job, data={'state': StateChoice.COMPLETED}, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            self.job.refresh_from_db()
+
+        complete()
+        self.assertEqual(self.job.completed_annotation_revision, 0)
+        label = Label.objects.create(task=self.task, name='ball')
+        put_job_data(self.job.id, {'version': 0, 'tags': [
+            {'frame': 0, 'label_id': label.id, 'group': 0, 'source': 'manual', 'attributes': []},
+        ], 'shapes': [], 'tracks': []})
+        self.assertEqual(self.job.labeledimage_set.count(), 1)
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.annotation_revision, 1)
+        self.assertIsNone(self.job.completed_annotation_revision)
+        self.assertEqual(self.job.state, StateChoice.IN_PROGRESS)
+
+        complete()
+        self.assertEqual(self.job.completed_annotation_revision, 1)
+        delete_job_data(self.job.id)
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.annotation_revision, 2)
+        self.assertIsNone(self.job.completed_annotation_revision)
+        self.assertEqual(self.job.state, StateChoice.IN_PROGRESS)
+
+    def test_rest_completed_revision_is_invalidated_by_annotation_writes(self):
+        url = f'/api/jobs/{self.job.id}'
+        denied = self._run_api_v2_jobs_id(self.job.id, self.somebody,
+            {'state': StateChoice.COMPLETED})
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
+        label = Label.objects.create(task=self.task, name='ball')
+        with ForceLogin(self.admin, self.client):
+            def complete(revision):
+                response = self.client.patch(url,
+                    data={'state': StateChoice.COMPLETED}, format='json')
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data['completed_annotation_revision'], revision)
+
+            def reopened(revision):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data['state'], StateChoice.IN_PROGRESS)
+                self.assertEqual(response.data['annotation_revision'], revision)
+                self.assertIsNone(response.data['completed_annotation_revision'])
+
+            annotation = {'version': 0, 'tags': [
+                {'frame': 0, 'label_id': label.id, 'group': 0,
+                 'source': 'manual', 'attributes': []},
+            ], 'shapes': [], 'tracks': []}
+            complete(0)
+            changed = self.client.put(f'{url}/annotations', data=annotation, format='json')
+            self.assertEqual(changed.status_code, status.HTTP_200_OK)
+            reopened(1)
+            complete(1)
+            annotation['tags'][0]['frame'] = 1
+            changed = self.client.patch(f'{url}/annotations?action=create',
+                data=annotation, format='json')
+            self.assertEqual(changed.status_code, status.HTTP_200_OK)
+            reopened(2)
+            complete(2)
+            deleted = self.client.delete(f'{url}/annotations', format='json')
+            self.assertEqual(deleted.status_code, status.HTTP_204_NO_CONTENT)
+            reopened(3)
 
     def test_api_v2_jobs_id_unknown_field(self):
         data = {"foo": "bar"}
