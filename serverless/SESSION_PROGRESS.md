@@ -129,7 +129,7 @@ docker start nuclio
 ```bash
 conda activate pingpong
 export HF_TOKEN=hf_your_token_here
-cd ~/pingpong/cvat/serverless
+cd ~/cvat-workspace/cvat/serverless
 ./deploy_gpu.sh
 
 nuctl get function --platform local

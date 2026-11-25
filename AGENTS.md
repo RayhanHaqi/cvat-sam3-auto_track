@@ -39,11 +39,13 @@ Auto-annotation functions packaged as Nuclio deployments (one folder per model w
 
 ## This Project's Labeling Workflow
 
-CVAT is used to label ball position in ping pong frames. Only **annotate** frames (frames containing ball action) are uploaded — background frames stay local and are merged back after export via `tracknet_env/preprocess/merge_background.py`.
+CVAT is used to label ball position in ping pong frames. Only **annotate** frames (frames containing ball action) are uploaded — background frames stay local and are merged after export with `/home/tilakoid/src/pingpong-trajectory-prediction/tools/preprocessing/merge_background.py`.
 
-**Import:** upload `annotate_train.zip` + `annotate_val.zip` from `tracknet_env/datasets/raw_dataset/<session>/`
+**Import:** upload `annotate_train.zip` + `annotate_val.zip` from `$HOME/data/tracknetv5/raw_dataset/<session>/`
 **Label:** use SAM2 or SAM3 auto-tracker to track the ball across frames (see SAM Tracker Deployments below)
-**Export:** YOLO Detection format → `tracknet_env/datasets/formatted_dataset/YOLO_Detection/`
+**Export:** YOLO Detection format → `$HOME/data/tracknetv5/formatted_dataset/YOLO_Detection/`
+
+Workspace-level instructions and custom utilities live one directory above this checkout in `/home/tilakoid/src/cvat`. Project-wide research context remains in `/home/tilakoid/src/pingpong-trajectory-prediction/memory`.
 
 ## SAM Tracker Deployments
 
