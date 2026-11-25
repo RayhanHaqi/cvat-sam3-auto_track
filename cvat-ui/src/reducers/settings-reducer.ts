@@ -16,7 +16,7 @@ const defaultState: SettingsState = {
     shapes: {
         colorBy: ColorBy.LABEL,
         opacity: 3,
-        selectedOpacity: 30,
+        selectedOpacity: 5,
         outlined: false,
         outlineColor: '#000000',
         showBitmap: false,
